@@ -70,7 +70,7 @@ Duplicate paths across roots are ignored once.
 
 Replace any old `uploader.lua` (or earlier Importer) with `docs/Importer.lua`. Save it on the computer as **`Importer.lua`** or **`uploader.lua`** — either name works; run `Importer` or `uploader` to match the filename.
 
-Layout (Alex’s library): disk label = artist, new audio goes to `music/<Artist - Album>/song.dfpwm` with multi-disk spill. Blank album → folder named after the artist (singles). Drag-drop UX, disk labeling, reserve space, and skipDuplicates are unchanged.
+Layout: disk label = artist, new audio goes to `music/<Artist - Album>/song.dfpwm` with multi-disk spill. Blank album → folder named after the artist (singles). Drag-drop UX, disk labeling, reserve space, and skipDuplicates are unchanged.
 
 Also accepts **`.lrc`** drops: matches to a library `.dfpwm` (basename / normalized / `Artist - Title` / tags; prefers the current artist/album session and same-drop pairs), writes beside that song, optional `/lyrics` mirror with spill, prints match/miss. Prefer Importer for new lyric drops; keep `sort-music --apply --lyrics-only` for bulk orphans already on the computer. Details: `fetch-lyrics.md`.
 
@@ -172,7 +172,7 @@ shell.run("visualizer", "--side=right")
 
 **Speed note:** if the viz still feels laggy after replacing both sides, confirm main + both visualizers were restarted (not just `F5`). Broadcast and draw are independent of the audio coroutine.
 
-**Alex must:** put updated `visualizer.lua` on both side machines as startup, then restart both side PCs (main only if you’re also picking up a jukebox change).
+**Update step:** put updated `visualizer.lua` on both side machines as startup, then restart both side PCs (main only if you’re also picking up a jukebox change).
 
 ## Delete songs / albums (`delete-music`)
 
@@ -185,7 +185,7 @@ delete-music --dry-run    -- preview only (prints paths, deletes nothing)
 
 Flow: pick **artist** → **album** → a **song**, or the top **DELETE ALBUM** action. Confirm with `y` / `yes` (required for real deletes). Song delete removes the `.dfpwm`, matching `.lrc` beside it, and any `/lyrics` (or `diskN/lyrics`) mirror for that track. Album delete does that for every track in the album, then removes empty album/artist folders. Never touches `sfx/` or unrelated mounts. Printed lines list every path deleted (or that would be deleted in dry-run). Afterward: restart jukebox or **F5** to refresh the library.
 
-## Alex run steps (scrolling title + lyric import)
+## Run steps (scrolling title + lyric import)
 
 1. **Visualizer marquee** — copy Project `docs/visualizer.lua` onto **both** side PCs (replace). Restart each side PC (startup preferred). Play a long title; top line should scroll with a short pause at start/end. Toggle LYRICS — header still scrolls if it doesn’t fit. Spectrum/waveform unchanged when lyrics is off.
 2. **Importer `.lrc`** — copy Project `docs/Importer.lua` onto the main computer as `Importer.lua` (or `uploader.lua`). Run it, pick artist/album, drop `.dfpwm` and/or `.lrc` on the computer screen. Matched lyrics land beside the song; misses print clearly. Same-drop song+lyric pairs work.

@@ -43,7 +43,7 @@
     breathe  — solid accent with soft breathe + gentle palette shift
   Press T while running to cycle title FX modes.
 
-  Alex: replace this file on each side PC and restart (startup preferred).
+  Replace this file on each side PC and restart (startup preferred).
 ]]
 
 ------------------------------------------------------------------ config

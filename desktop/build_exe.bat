@@ -29,6 +29,16 @@ if errorlevel 1 (
   )
 )
 
+python -c "import yt_dlp" 2>nul
+if errorlevel 1 (
+  echo Installing yt-dlp...
+  python -m pip install --upgrade yt-dlp
+  if errorlevel 1 (
+    echo ERROR: could not install yt-dlp.
+    exit /b 1
+  )
+)
+
 if not exist assets\background.jpg if not exist assets\background.png (
   echo ERROR: assets\background.jpg ^(or .png^) missing.
   exit /b 1
@@ -51,7 +61,10 @@ python -m PyInstaller ^
   --name CC_Music_Tools ^
   --add-data "assets;assets" ^
   --hidden-import convert_core ^
+  --hidden-import download_core ^
   --hidden-import lyrics_core ^
+  --hidden-import yt_dlp ^
+  --collect-submodules yt_dlp ^
   --hidden-import PIL ^
   --hidden-import PIL.Image ^
   --hidden-import PIL.ImageTk ^
@@ -73,7 +86,8 @@ for %%F in (dist\*.toc dist\*.pkg dist\warn-*.txt dist\xref-*.html) do (
 echo.
 echo Done: %cd%\dist\CC_Music_Tools.exe
 echo Double-click that exe to open the app.
-echo Convert still needs ffmpeg 5.1+ on PATH:  winget install ffmpeg
+echo Convert / Download MP3 extract need ffmpeg 5.1+ on PATH:  winget install ffmpeg
+echo Download tab also needs yt-dlp:  python -m pip install -U yt-dlp
 echo.
 endlocal
 exit /b 0

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-USER_AGENT = "CC-Music-Tools/1.0 (https://lrclib.net/docs; alex-cc-jukebox)"
+USER_AGENT = "CC-Music-Tools/1.1 (https://lrclib.net/docs; ProOnlyUNO)"
 API_BASE = "https://lrclib.net"
 DEFAULT_DELAY = 0.55
 

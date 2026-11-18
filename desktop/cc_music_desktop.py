@@ -2,10 +2,13 @@
 """
 CC Music Tools — Windows desktop GUI for CC:Tweaked jukebox prep.
 
+Developer: ProOnlyUNO
+
 Tabs:
+  Download  — YouTube playlist/album URL → select tracks → MP3 (yt-dlp)
   Convert   — MP3/WAV/… → .dfpwm (needs ffmpeg 5.1+)
   Lyrics    — LRCLIB public API → .lrc beside tracks + pack
-  How to use
+  How to use / Commands
 """
 
 from __future__ import annotations
@@ -20,9 +23,12 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 import convert_core
+import download_core
 import lyrics_core
 
 APP_TITLE = "CC Music Tools"
+APP_VERSION = "1.1.0"
+DEVELOPER = "ProOnlyUNO"
 
 
 def _install_dir() -> Path:
@@ -39,8 +45,10 @@ def _bundle_dir() -> Path:
 
 
 APP_DIR = _install_dir()
+DEFAULT_DOWNLOAD_OUT = APP_DIR / "mp3_downloads"
 DEFAULT_CONVERT_OUT = APP_DIR / "dfpwm_out"
 DEFAULT_LYRICS_PACK = APP_DIR / "lyrics_pack"
+YTMP3_ALT_URL = "https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz"
 
 # Matrix / binary cyan theme
 COLORS = {
@@ -84,6 +92,9 @@ class App(tk.Tk):
         self._bg_src = None
         self._bg_photo = None
         self._bg_size: tuple[int, int] | None = None
+        self._playlist_entries: list[download_core.PlaylistEntry] = []
+        self._track_vars: list[tk.BooleanVar] = []
+        self._playlist_title: str = ""
 
         self._load_background_source()
         self._build()
@@ -198,22 +209,26 @@ class App(tk.Tk):
         ttk.Label(header, text=APP_TITLE, style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="Convert songs to DFPWM and fetch synced lyrics for your CC:Tweaked jukebox.",
+            text=f"Download → Convert → Lyrics for your CC:Tweaked jukebox.  Developer: {DEVELOPER}  ·  v{APP_VERSION}",
             style="Subhead.TLabel",
         ).pack(anchor="w")
 
         nb = ttk.Notebook(shell)
         nb.pack(fill="both", expand=True, padx=12, pady=(4, 0))
+        self._notebook = nb
 
+        self.tab_download = ttk.Frame(nb, padding=10, style="Card.TFrame")
         self.tab_convert = ttk.Frame(nb, padding=10, style="Card.TFrame")
         self.tab_lyrics = ttk.Frame(nb, padding=10, style="Card.TFrame")
         self.tab_help = ttk.Frame(nb, padding=10, style="Card.TFrame")
         self.tab_commands = ttk.Frame(nb, padding=10, style="Card.TFrame")
+        nb.add(self.tab_download, text="  Download  ")
         nb.add(self.tab_convert, text="  Convert  ")
         nb.add(self.tab_lyrics, text="  Fetch lyrics  ")
         nb.add(self.tab_help, text="  How to use  ")
         nb.add(self.tab_commands, text="  Commands  ")
 
+        self._build_download(self.tab_download)
         self._build_convert(self.tab_convert)
         self._build_lyrics(self.tab_lyrics)
         self._build_help(self.tab_help)
@@ -270,6 +285,121 @@ class App(tk.Tk):
         self._bg_canvas.delete("bg")
         self._bg_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
         self._bg_canvas.tag_lower("bg")
+
+    def _build_download(self, parent: ttk.Frame) -> None:
+        self.dl_url = tk.StringVar()
+        self.dl_out = tk.StringVar(value=str(DEFAULT_DOWNLOAD_OUT))
+        self.dl_status = tk.StringVar(value="Paste a YouTube playlist or album URL, then Fetch titles.")
+
+        url_frame = ttk.Frame(parent, style="Card.TFrame")
+        url_frame.pack(fill="x", pady=(0, 4))
+        ttk.Label(url_frame, text="YouTube playlist / album URL").pack(anchor="w")
+        url_row = ttk.Frame(url_frame, style="Card.TFrame")
+        url_row.pack(fill="x")
+        ttk.Entry(url_row, textvariable=self.dl_url).pack(side="left", fill="x", expand=True)
+        ttk.Button(url_row, text="Fetch titles", command=self._start_fetch_playlist, width=12).pack(
+            side="left", padx=(6, 0)
+        )
+
+        self._path_row(parent, "MP3 download folder", self.dl_out, lambda: self._pick_dir(self.dl_out))
+
+        list_wrap = ttk.LabelFrame(parent, text="Tracks", padding=6)
+        list_wrap.pack(fill="both", expand=True, pady=(8, 0))
+
+        canvas_row = ttk.Frame(list_wrap, style="Card.TFrame")
+        canvas_row.pack(fill="both", expand=True)
+        self._dl_canvas = tk.Canvas(
+            canvas_row,
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            bg=COLORS["entry_bg"],
+            height=180,
+        )
+        dl_scroll = ttk.Scrollbar(canvas_row, orient="vertical", command=self._dl_canvas.yview)
+        self._dl_canvas.configure(yscrollcommand=dl_scroll.set)
+        self._dl_canvas.pack(side="left", fill="both", expand=True)
+        dl_scroll.pack(side="right", fill="y")
+
+        self._dl_inner = ttk.Frame(self._dl_canvas, style="Card.TFrame")
+        self._dl_window = self._dl_canvas.create_window((0, 0), window=self._dl_inner, anchor="nw")
+        self._dl_inner.bind(
+            "<Configure>",
+            lambda _e: self._dl_canvas.configure(scrollregion=self._dl_canvas.bbox("all")),
+        )
+        self._dl_canvas.bind(
+            "<Configure>",
+            lambda e: self._dl_canvas.itemconfigure(self._dl_window, width=e.width),
+        )
+
+        sel_row = ttk.Frame(list_wrap, style="Card.TFrame")
+        sel_row.pack(fill="x", pady=(6, 0))
+        ttk.Button(sel_row, text="Select all", command=lambda: self._set_all_tracks(True), width=12).pack(
+            side="left"
+        )
+        ttk.Button(sel_row, text="Select none", command=lambda: self._set_all_tracks(False), width=12).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Label(sel_row, textvariable=self.dl_status, style="Dim.TLabel").pack(side="left", padx=(12, 0))
+
+        ttk.Label(
+            parent,
+            text=(
+                "Uses yt-dlp (recommended). Install:  python -m pip install -U yt-dlp   "
+                "· also needs ffmpeg for MP3 extract. After download, switch to Convert.\n"
+                f"Alternate (browser): {YTMP3_ALT_URL}"
+            ),
+            wraplength=740,
+            style="Dim.TLabel",
+        ).pack(anchor="w", pady=(8, 0))
+
+        actions = ttk.Frame(parent, style="Card.TFrame")
+        actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Download selected MP3s", command=self._start_download).pack(side="left")
+        ttk.Button(actions, text="Send folder → Convert", command=self._handoff_to_convert).pack(
+            side="left", padx=(8, 0)
+        )
+
+    def _clear_track_list(self) -> None:
+        for child in self._dl_inner.winfo_children():
+            child.destroy()
+        self._track_vars = []
+        self._playlist_entries = []
+
+    def _populate_track_list(self, entries: list[download_core.PlaylistEntry]) -> None:
+        self._clear_track_list()
+        self._playlist_entries = list(entries)
+        for entry in entries:
+            var = tk.BooleanVar(value=True)
+            self._track_vars.append(var)
+            label = f"{entry.index:03d}.  {entry.title}  ({download_core.format_duration(entry.duration)})"
+            ttk.Checkbutton(self._dl_inner, text=label, variable=var).pack(anchor="w", pady=1)
+        self.dl_status.set(f"{self._playlist_title} — {len(entries)} track(s)")
+        self._dl_canvas.yview_moveto(0)
+
+    def _set_all_tracks(self, value: bool) -> None:
+        for var in self._track_vars:
+            var.set(value)
+
+    def _selected_entries(self) -> list[download_core.PlaylistEntry]:
+        out: list[download_core.PlaylistEntry] = []
+        for entry, var in zip(self._playlist_entries, self._track_vars):
+            if var.get():
+                out.append(entry)
+        return out
+
+    def _handoff_to_convert(self) -> None:
+        folder = self.dl_out.get().strip()
+        if not folder:
+            messagebox.showerror(APP_TITLE, "Pick an MP3 download folder first.")
+            return
+        path = Path(folder)
+        if not path.is_dir():
+            messagebox.showerror(APP_TITLE, f"Folder not found:\n{folder}")
+            return
+        self.conv_input.set(str(path.resolve()))
+        self._notebook.select(self.tab_convert)
+        self.status.configure(text="Convert input set from Download folder.")
+        self._append_log(f"Hand-off → Convert input: {path.resolve()}")
 
     def _build_convert(self, parent: ttk.Frame) -> None:
         self.conv_input = tk.StringVar()
@@ -369,14 +499,13 @@ class App(tk.Tk):
 
     def _build_help(self, parent: ttk.Frame) -> None:
         text = self._info_text(parent)
-        help_body = """How to use — CC Music Tools
-Made to feel easy end-to-end: Windows prep here, then drop files into your CC:Tweaked jukebox.
+        help_body = f"""How to use — CC Music Tools
+Developer: {DEVELOPER}  ·  v{APP_VERSION}
 
-Open the setup/ folder next to this app (START_HERE.txt). It maps exactly which
-.lua files go on which computer — no guessing.
+Windows prep here, then drop files into your CC:Tweaked jukebox.
+Open setup/ next to this app (START_HERE.txt) for which .lua goes on which computer.
 
 1) Install the CC scripts first (in Minecraft)
-   Use setup/ in this install:
    • setup/main-computer/     → jukebox.lua, Importer.lua
                                  (+ optional sort-music.lua, delete-music.lua, lyrics-status.lua)
    • setup/side-visualizer/   → visualizer.lua  (each side PC)
@@ -386,26 +515,25 @@ Open the setup/ folder next to this app (START_HERE.txt). It maps exactly which
 2) Recommended monitors
    • Main jukebox: 9×3 Advanced Monitor, scale 0.5
    • Side visualizers: 4×4 Advanced Monitor each, scale 0.5
-   Main stays the jukebox UI. Sides are separate computers on the same network.
 
 3) Wireless pocket remote — pocket.lua
-   • Put an Ender Modem on the MAIN jukebox computer and on the Pocket Computer.
-   • Copy setup/pocket-remote/pocket.lua onto the pocket.
-   • Run: pocket   (or startup: shell.run("pocket"))
-   • Protocol: pocket_mp3 (talks to jukebox.lua on the main PC).
-   • Stay in range → tap SYNC → tap any song to play.
-   • Play / pause / skip / shuffle / volume work from your pocket while the jukebox runs.
+   • Ender Modem on MAIN + Pocket → copy pocket.lua → run: pocket
+   • Protocol: pocket_mp3 · SYNC → tap a song
 
 4) Desktop tools flow (this app)
-   a. Convert — Browse your MP3/WAV/FLAC folder → Convert to DFPWM
+   a. Download (optional) — paste a YouTube playlist/album URL → Fetch titles
+      → check the tracks you want → Download selected MP3s
+      → Send folder → Convert
+      Needs yt-dlp:  python -m pip install -U yt-dlp
+      Alternate (browser only): {YTMP3_ALT_URL}
+   b. Convert — Browse your MP3/WAV/FLAC folder → Convert to DFPWM
       (needs ffmpeg 5.1+ on PATH: winget install ffmpeg)
-   b. Fetch lyrics — point at the .dfpwm folder → Fetch lyrics (public LRCLIB only)
-   c. Open output folder, copy the .dfpwm (+ .lrc) into Minecraft
-   d. In-game: run Importer → drag-drop onto the computer screen (not a monitor)
-   e. Restart jukebox (or F5) — songs with lyrics show (L)
+   c. Fetch lyrics — point at the .dfpwm folder → Fetch lyrics (public LRCLIB only)
+   d. Open output folder, copy the .dfpwm (+ .lrc) into Minecraft
+   e. In-game: run Importer → drag-drop onto the computer screen (not a monitor)
+   f. Restart jukebox (or F5) — songs with lyrics show (L)
 
-That’s the whole loop. Browse… always lets you pick the exact folders you want.
-Use Dry run anytime you want a preview with no writes.
+That’s the whole loop. Use Dry run anytime for a preview with no writes.
 See the Commands tab for the short in-game cheat sheet.
 """
         text.insert("1.0", help_body)
@@ -534,8 +662,7 @@ You’re set — enjoy the music.
     def _open_output(self) -> None:
         target = self._last_out
         if target is None:
-            # Prefer current tab-ish defaults
-            for cand in (self.conv_out.get(), self.lyr_pack.get()):
+            for cand in (self.dl_out.get(), self.conv_out.get(), self.lyr_pack.get()):
                 p = Path(cand) if cand else None
                 if p and p.exists():
                     target = p
@@ -550,6 +677,92 @@ You’re set — enjoy the music.
             subprocess.Popen(["xdg-open", path])
 
     # -------------------------------------------------------------- workers
+    def _start_fetch_playlist(self) -> None:
+        if self._busy:
+            messagebox.showwarning(APP_TITLE, "A job is already running.")
+            return
+        url = self.dl_url.get().strip()
+        if not url:
+            messagebox.showerror(APP_TITLE, "Paste a YouTube playlist or album URL first.")
+            return
+
+        self._cancel = False
+        self._set_busy(True)
+        self._append_log("--- Download: fetch titles ---")
+        self.dl_status.set("Fetching playlist…")
+
+        def work() -> None:
+            try:
+                title, entries = download_core.list_playlist(url, log=self._ui_log)
+
+                def apply() -> None:
+                    self._playlist_title = title
+                    self._populate_track_list(entries)
+                    self._set_busy(False)
+
+                self.after(0, apply)
+            except Exception as e:  # noqa: BLE001
+                self._ui_log(f"ERROR: {e}")
+
+                def fail() -> None:
+                    self.dl_status.set("Fetch failed — see log.")
+                    self._set_busy(False)
+
+                self.after(0, fail)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_download(self) -> None:
+        if self._busy:
+            messagebox.showwarning(APP_TITLE, "A job is already running.")
+            return
+        selected = self._selected_entries()
+        if not selected:
+            messagebox.showerror(APP_TITLE, "Fetch titles first, then check at least one track.")
+            return
+        out = self.dl_out.get().strip()
+        if not out:
+            messagebox.showerror(APP_TITLE, "Pick an MP3 download folder.")
+            return
+
+        self._cancel = False
+        self._set_busy(True)
+        self._append_log("--- Download: MP3 ---")
+        self._last_out = Path(out)
+        self.dl_status.set(f"Downloading {len(selected)} track(s)…")
+
+        def work() -> None:
+            try:
+                ok, fail, folder = download_core.download_entries(
+                    selected,
+                    out,
+                    log=self._ui_log,
+                    should_cancel=lambda: self._cancel,
+                )
+
+                def done() -> None:
+                    self.dl_status.set(f"Saved {ok}, failed {fail} → {folder}")
+                    self._set_busy(False)
+                    if ok > 0:
+                        # Offer hand-off into Convert
+                        if messagebox.askyesno(
+                            APP_TITLE,
+                            f"Downloaded {ok} MP3(s).\n\nSend this folder to the Convert tab?",
+                        ):
+                            self._handoff_to_convert()
+
+                self.after(0, done)
+            except Exception as e:  # noqa: BLE001
+                self._ui_log(f"ERROR: {e}")
+
+                def fail_ui() -> None:
+                    self.dl_status.set("Download failed — see log.")
+                    self._set_busy(False)
+
+                self.after(0, fail_ui)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _start_convert(self) -> None:
         if self._busy:
             messagebox.showwarning(APP_TITLE, "A job is already running.")

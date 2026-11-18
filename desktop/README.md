@@ -1,0 +1,128 @@
+# CC Music Tools
+
+One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plus a clear **`setup/`** folder that maps which scripts go on which computer.
+
+**Developer: ProOnlyUNO** · v1.1.0
+
+1. **Download** — YouTube playlist/album URL → pick tracks → MP3 (via **yt-dlp**)
+2. **Convert** — MP3 / WAV / FLAC / … → `.dfpwm`
+3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
+4. **How to use** / **Commands** — friendly in-app guides
+
+## Quick start (Setup.exe)
+
+1. Install **ffmpeg 5.1+** (needed for Convert and for MP3 extract):
+   ```text
+   winget install ffmpeg
+   ```
+2. Install **yt-dlp** if you will use the Download tab:
+   ```text
+   python -m pip install -U yt-dlp
+   ```
+   Or: `winget install yt-dlp.yt-dlp`
+3. Double-click **`Setup.exe`**.
+4. Choose where to put CC Music Tools (default: `Documents\CC-Music-Tools`).
+5. Optional Start Menu / Desktop shortcuts → **Install**.
+6. Open the app. Your install folder also gets **`setup/`** (in-game scripts).
+
+Dev shortcut: double-click **`dist\CC_Music_Tools.exe`**.
+
+## Download tab (YouTube → MP3)
+
+1. Open **Download**.
+2. Paste a YouTube **playlist** or **album** URL.
+3. Click **Fetch titles** — checklist of tracks appears.
+4. Select the songs you want (Select all / Select none).
+5. Pick an MP3 download folder → **Download selected MP3s**.
+6. Click **Send folder → Convert** (or Convert will open after a successful download).
+7. On **Convert**, turn those MP3s into `.dfpwm`.
+
+Uses **yt-dlp** in-app (more reliable than browser scrapers). Keep yt-dlp updated.
+
+### Alternate (browser only)
+
+If you prefer not to install yt-dlp, use this playlist downloader in a browser, save MP3s to a folder, then use **Convert** in this app:
+
+https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz
+
+## In-game setup map (`setup/`)
+
+Start with **`setup/START_HERE.txt`**.
+
+| Folder | Computer | What to copy |
+|--------|----------|--------------|
+| `setup/main-computer/` | Main music PC | `jukebox.lua`, `Importer.lua`, optional `sort-music.lua`, `delete-music.lua`, `lyrics-status.lua` |
+| `setup/side-visualizer/` | Each side PC | `visualizer.lua` — left: `visualizer --side=left` · right: `--side=right` |
+| `setup/pocket-remote/` | Pocket Advanced Computer | **`pocket.lua`** (protocol **`pocket_mp3`**) |
+
+**Monitors:** main **9×3** Advanced Monitor @ scale **0.5**; side viz **4×4** @ **0.5**.
+
+**Pocket remote:** Ender Modem on pocket + main → copy `pocket.lua` → run `pocket` (or `shell.run("pocket")` in startup) → SYNC → tap a song.
+
+## Desktop flow → Minecraft
+
+1. **Download** (optional) songs as MP3, or use your own files
+2. **Convert** songs to `.dfpwm`
+3. **Fetch lyrics** (optional)
+4. Copy files into the game
+5. Run **Importer** and drag-drop onto the **computer screen**
+6. Restart jukebox so tracks with lyrics show `(L)`
+
+## App tabs
+
+| Tab | Purpose |
+|-----|---------|
+| **Download** | YouTube playlist/album → checklist → MP3 (yt-dlp) |
+| **Convert** | Folder or audio files → `.dfpwm` |
+| **Fetch lyrics** | `.dfpwm` library → `.lrc` + pack |
+| **How to use** | Full friendly guide (points at `setup/`) |
+| **Commands** | Short cheat sheet: startup, viz sides, `pocket.lua`, sort/delete/Importer |
+
+## Run from source
+
+```text
+cd C:\Users\Smoke\Downloads\CC-Music-Tools
+python -m pip install -U yt-dlp pillow
+python cc_music_desktop.py
+```
+
+Needs **Python 3.10+** (tkinter + Pillow). Conversion / MP3 extract still need **ffmpeg**. Download tab needs **yt-dlp**.
+
+## Build
+
+```text
+cd C:\Users\Smoke\Downloads\CC-Music-Tools
+build_exe.bat
+build_setup.bat
+```
+
+- `build_exe.bat` → `dist\CC_Music_Tools.exe`
+- `build_setup.bat` → **`Setup.exe`** (embeds exe + assets + README + **setup/**)
+
+## Files in this folder
+
+| File | Role |
+|------|------|
+| `Setup.exe` | Freestanding installer |
+| `setup/` | In-game script map (main / side / pocket) |
+| `cc_music_desktop.py` | GUI |
+| `download_core.py` | YouTube playlist → MP3 (yt-dlp) |
+| `setup_cc_music.py` | Installer source |
+| `assets\background.jpg` | Matrix background |
+| `dist\CC_Music_Tools.exe` | Built app |
+
+## Dependencies
+
+| Need | Required? |
+|------|-----------|
+| Download tab | **yt-dlp** + **ffmpeg** (for MP3 extract) |
+| Convert tab | **ffmpeg 5.1+** with `dfpwm` |
+| Fetch lyrics | No (internet only) |
+| GUI | Python + tkinter + Pillow, or the exe |
+
+Check ffmpeg: `ffmpeg -hide_banner -encoders | findstr dfpwm`  
+Check yt-dlp: `python -m yt_dlp --version`
+
+## Credit
+
+Developer: **ProOnlyUNO**

@@ -1,7 +1,7 @@
 --[[
   Importer.lua - drag & drop song + lyrics sorter for CC:Tweaked
 
-  Layout it maintains (same as Alex's library / jukebox expects):
+  Layout it maintains (same as the jukebox library expects):
       <disk label = artist>
           music/<Artist - Album>/<song>.dfpwm
           music/<Artist - Album>/<song>.lrc   (optional, beside audio)
