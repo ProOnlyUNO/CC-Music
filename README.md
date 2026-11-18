@@ -6,7 +6,7 @@
 
 **CC:Tweaked** jukebox + side visualizers + pocket remote, with a Windows desktop helper for YouTube → MP3 download, DFPWM convert, and lyrics.
 
-**Developer: ProOnlyUNO** · v1.2.0
+**Developer: ProOnlyUNO** · v1.0.0
 
 ## What’s included
 
