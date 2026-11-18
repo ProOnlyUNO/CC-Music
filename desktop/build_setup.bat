@@ -31,6 +31,8 @@ copy /y README.md _setup_payload\README.md >nul
 xcopy /e /i /y assets _setup_payload\assets >nul
 if exist setup (
   xcopy /e /i /y setup _setup_payload\setup >nul
+) else if exist ..\setup (
+  xcopy /e /i /y ..\setup _setup_payload\setup >nul
 ) else (
   echo ERROR: setup\ folder missing — create it before building Setup.exe.
   exit /b 1
