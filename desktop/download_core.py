@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from name_sanitize import sanitize_media_path, unique_filename
+
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
 
@@ -411,8 +413,19 @@ def download_entries(
             break
 
         safe = _safe_filename(entry.title)
-        # Extension placeholder filled by yt-dlp / postprocessor
-        outtmpl = str(out / f"{entry.index:03d} - {safe} [{entry.id}].%(ext)s")
+        # Clean outtmpl — no [youtubeId] suffix (kept unique via index + disambiguator).
+        base_stem = f"{entry.index:03d} - {safe}"
+        reserved_names = {p.name.lower() for p in out.iterdir()} if out.exists() else set()
+        # Pre-claim the intended mp3 name so parallel-ish loops stay unique.
+        claimed = unique_filename(
+            out,
+            f"{base_stem}.mp3",
+            reserved=reserved_names,
+            disambiguator=entry.id,
+        )
+        claimed_stem = Path(claimed).stem
+        reserved_names.add(claimed.lower())
+        outtmpl = str(out / f"{claimed_stem}.%(ext)s")
 
         if log:
             log(f"[{n}/{len(selected)}] {entry.title}")
@@ -426,8 +439,17 @@ def download_entries(
                 produced = _download_one_exe(exe, entry, outtmpl, log)
 
             if produced is None:
-                matches = list(out.glob(f"{entry.index:03d} - {safe} [{entry.id}].*"))
+                matches = list(out.glob(f"{claimed_stem}.*"))
                 produced = matches[0] if matches else None
+
+            # Belt-and-suspenders: strip any trailing [youtubeId] yt-dlp/templates left,
+            # and keep a matching .lrc renamed in lockstep.
+            if produced is not None and produced.exists():
+                cleaned = sanitize_media_path(produced, reserved=reserved_names)
+                if cleaned != produced and log:
+                    log(f"  renamed → {cleaned.name}")
+                produced = cleaned
+
             if log:
                 log(f"  OK → {produced.name if produced else '(done)'}")
             ok_count += 1

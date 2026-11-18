@@ -70,7 +70,9 @@ def split_camel(s: str) -> str:
 
 
 def clean_title(stem: str) -> str:
-    t = stem.strip()
+    from name_sanitize import clean_stem_for_output
+
+    t = clean_stem_for_output(stem.strip())
     t = re.sub(r"[\._]+", " ", t)
     t = re.sub(r"^\d{1,3}[\s\-_.]+", "", t)
     t = re.sub(r"\s+LYRICS\s*$", "", t, flags=re.I)
