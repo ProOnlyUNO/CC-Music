@@ -84,9 +84,10 @@ class SetupApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"{APP_NAME} Setup")
-        self.geometry("560x360")
-        self.minsize(520, 340)
-        self.resizable(False, False)
+        # Tall enough that Install/Cancel stay visible under DPI scaling.
+        self.geometry("580x480")
+        self.minsize(560, 460)
+        self.resizable(True, True)
 
         self.payload = locate_payload()
         self.dest = tk.StringVar(value=str(DEFAULT_DIR))
@@ -106,14 +107,30 @@ class SetupApp(tk.Tk):
         pad = ttk.Frame(self, padding=16)
         pad.pack(fill="both", expand=True)
 
-        ttk.Label(pad, text=f"{APP_NAME} Setup", font=("Segoe UI Semibold", 16)).pack(anchor="w")
+        # Pin Install/Cancel at the bottom so they never clip off-screen.
+        footer = ttk.Frame(pad)
+        footer.pack(side="bottom", fill="x", pady=(12, 0))
+        ttk.Label(footer, text="Developer: ProOnlyUNO", foreground="#555").pack(side="left")
+        ttk.Button(footer, text="Cancel", command=self.destroy).pack(side="right")
+        self.btn_install = ttk.Button(footer, text="Install", command=self._install)
+        self.btn_install.pack(side="right", padx=(0, 8))
+        if self.payload is None:
+            self.btn_install.configure(state="disabled")
+
+        self.status = ttk.Label(pad, text=self._status_text(), foreground="#333")
+        self.status.pack(side="bottom", anchor="w", pady=(8, 0))
+
+        body = ttk.Frame(pad)
+        body.pack(side="top", fill="both", expand=True)
+
+        ttk.Label(body, text=f"{APP_NAME} Setup", font=("Segoe UI Semibold", 16)).pack(anchor="w")
         ttk.Label(
-            pad,
+            body,
             text="Choose where to install the app. Setup copies the exe, assets, and README.",
             wraplength=520,
         ).pack(anchor="w", pady=(4, 12))
 
-        loc = ttk.LabelFrame(pad, text="Install location", padding=10)
+        loc = ttk.LabelFrame(body, text="Install location", padding=10)
         loc.pack(fill="x")
         row = ttk.Frame(loc)
         row.pack(fill="x")
@@ -129,7 +146,7 @@ class SetupApp(tk.Tk):
             side="left", padx=(8, 0)
         )
 
-        opts = ttk.LabelFrame(pad, text="Shortcuts", padding=10)
+        opts = ttk.LabelFrame(body, text="Shortcuts", padding=10)
         opts.pack(fill="x", pady=(12, 0))
         ttk.Checkbutton(opts, text="Start Menu shortcut", variable=self.start_menu).pack(anchor="w")
         ttk.Checkbutton(opts, text="Desktop shortcut", variable=self.desktop).pack(anchor="w")
@@ -137,21 +154,10 @@ class SetupApp(tk.Tk):
             anchor="w", pady=(4, 0)
         )
 
-        self.status = ttk.Label(pad, text=self._status_text(), foreground="#333")
-        self.status.pack(anchor="w", pady=(12, 0))
-
-        actions = ttk.Frame(pad)
-        actions.pack(fill="x", pady=(16, 0))
-        ttk.Button(actions, text="Cancel", command=self.destroy).pack(side="right")
-        self.btn_install = ttk.Button(actions, text="Install", command=self._install)
-        self.btn_install.pack(side="right", padx=(0, 8))
-        if self.payload is None:
-            self.btn_install.configure(state="disabled")
-
     def _status_text(self) -> str:
         if self.payload is None:
-            return "Payload missing."
-        return f"Payload: {self.payload}"
+            return "Installer files missing — re-download Setup.exe from the latest release."
+        return "Ready to install."
 
     def _browse(self) -> None:
         initial = self.dest.get().strip() or str(DEFAULT_DIR)
