@@ -42,14 +42,26 @@ if exist build rmdir /s /q build
 if exist Setup.spec del /f /q Setup.spec
 if exist Setup.exe del /f /q Setup.exe
 
-echo Running PyInstaller for Setup.exe (embeds payload)...
+if not exist assets\app-icon.ico (
+  echo Building assets\app-icon.ico from app-icon.png...
+  python _make_icon.py
+  if errorlevel 1 (
+    echo ERROR: could not build app-icon.ico
+    exit /b 1
+  )
+)
+
+echo Running PyInstaller for Setup.exe (embeds payload + icon)...
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
   --onefile ^
   --windowed ^
   --name Setup ^
+  --icon "assets\app-icon.ico" ^
   --add-data "_setup_payload;payload" ^
+  --add-data "assets\app-icon.ico;assets" ^
+  --add-data "assets\app-icon.png;assets" ^
   setup_cc_music.py
 
 if errorlevel 1 (

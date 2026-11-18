@@ -2,7 +2,7 @@
 
 **CC:Tweaked** jukebox + side visualizers + pocket remote, with a Windows desktop helper for YouTube → MP3 download, DFPWM convert, and lyrics.
 
-**Developer: ProOnlyUNO** · v1.1.1
+**Developer: ProOnlyUNO** · v1.2.0
 
 ## What’s included
 
@@ -19,20 +19,16 @@
 ### 1. Windows desktop (recommended)
 
 1. Download **`Setup.exe`** from the [latest release](https://github.com/ProOnlyUNO/CC-Music/releases/latest).
-2. Install **ffmpeg 5.1+** (Convert + MP3 extract):
+2. Run **Setup.exe** → choose install folder (default `Documents\CC-Music-Tools`) → leave **Install / ensure ffmpeg + yt-dlp** checked → **Install**.
+3. Setup auto-installs ffmpeg + yt-dlp when winget/pip/choco are available and reports success/fail. Manual fallback:
    ```text
    winget install ffmpeg
-   ```
-3. Install **yt-dlp** for the Download tab:
-   ```text
    python -m pip install -U yt-dlp
    ```
-   Or: `winget install yt-dlp.yt-dlp`
-4. Run **Setup.exe** → choose install folder (default `Documents\CC-Music-Tools`) → Install.
-5. Open the app:
+4. Open the app:
    - **Download** — paste a YouTube playlist/album URL → Fetch titles → check tracks → Download selected MP3s → Send folder → Convert
    - **Convert** → **Fetch lyrics** (optional)
-6. Your install folder also gets the in-game **`setup/`** script map.
+5. Your install folder also gets the in-game **`setup/`** script map.
 
 Or run from source:
 
