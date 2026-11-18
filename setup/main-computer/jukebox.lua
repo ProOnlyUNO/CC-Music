@@ -627,7 +627,7 @@ local function beginFadeIn(dur)
 end
 
 -- Scan sfx/ for DJ stings (SFX1.dfpwm, "SFX 2.dfpwm", …). Re-lists each flip
--- so Alex can drop more files without editing the program.
+-- so you can drop more files without editing the program.
 local function scanDjSfx()
   local dir = CONFIG.sfxDir
   local list = {}

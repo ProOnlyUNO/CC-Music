@@ -1,8 +1,8 @@
 # CC Music
 
-**CC:Tweaked** jukebox + side visualizers + pocket remote, with a Windows desktop helper for convert + lyrics.
+**CC:Tweaked** jukebox + side visualizers + pocket remote, with a Windows desktop helper for YouTube → MP3 download, DFPWM convert, and lyrics.
 
-**Developer: ProOnlyUNO**
+**Developer: ProOnlyUNO** · v1.1.0
 
 ## What’s included
 
@@ -12,27 +12,41 @@
 | **Side visualizers** | Spectrum / waveform / particles on **4×4** monitors; **LYRICS** big-text mode |
 | **Pocket remote** | Wireless library sync + tap-to-play (`pocket_mp3`) |
 | **Importer / sort / delete** | Drag-drop `.dfpwm` + `.lrc`, tidy library, safe deletes |
-| **CC Music Tools (Windows)** | Convert audio → `.dfpwm`, fetch lyrics (LRCLIB), install `setup/` map |
+| **CC Music Tools (Windows)** | Download YouTube playlists → MP3, convert → `.dfpwm`, fetch lyrics (LRCLIB), install `setup/` map |
 
 ## How to use
 
 ### 1. Windows desktop (recommended)
 
 1. Download **`Setup.exe`** from the [latest release](https://github.com/ProOnlyUNO/CC-Music/releases/latest).
-2. Install **ffmpeg 5.1+** if you will convert audio:
+2. Install **ffmpeg 5.1+** (Convert + MP3 extract):
    ```text
    winget install ffmpeg
    ```
-3. Run **Setup.exe** → choose install folder (default `Documents\CC-Music-Tools`) → Install.
-4. Open the app: **Convert** songs → **Fetch lyrics** (optional).
-5. Your install folder also gets the in-game **`setup/`** script map.
+3. Install **yt-dlp** for the Download tab:
+   ```text
+   python -m pip install -U yt-dlp
+   ```
+   Or: `winget install yt-dlp.yt-dlp`
+4. Run **Setup.exe** → choose install folder (default `Documents\CC-Music-Tools`) → Install.
+5. Open the app:
+   - **Download** — paste a YouTube playlist/album URL → Fetch titles → check tracks → Download selected MP3s → Send folder → Convert
+   - **Convert** → **Fetch lyrics** (optional)
+6. Your install folder also gets the in-game **`setup/`** script map.
 
 Or run from source:
 
 ```text
 cd desktop
+python -m pip install -U yt-dlp pillow
 python cc_music_desktop.py
 ```
+
+#### Alternate YouTube → MP3 (browser)
+
+If you prefer not to install yt-dlp, use this playlist downloader in a browser, save MP3s to a folder, then use **Convert** in CC Music Tools:
+
+https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz
 
 ### 2. In-game computers (`setup/`)
 
@@ -50,7 +64,7 @@ Start with [`setup/START_HERE.txt`](setup/START_HERE.txt).
 
 ### 3. Desktop → Minecraft flow
 
-1. Convert → Fetch lyrics in CC Music Tools  
+1. Download (optional) → Convert → Fetch lyrics in CC Music Tools  
 2. Copy `.dfpwm` / `.lrc` into the game  
 3. Run **Importer** and drag-drop onto the **computer screen**  
 4. Restart jukebox so tracks with lyrics show `(L)`
