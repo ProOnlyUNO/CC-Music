@@ -27,7 +27,7 @@ import download_core
 import lyrics_core
 
 APP_TITLE = "CC Music Tools"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.0"
 DEVELOPER = "ProOnlyUNO"
 
 

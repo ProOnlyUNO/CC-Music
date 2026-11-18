@@ -20,7 +20,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "CC Music Tools"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.0"
 EXE_NAME = "CC_Music_Tools.exe"
 DEFAULT_DIR = Path.home() / "Documents" / "CC-Music-Tools"
 PROGRAM_FILES = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "CC-Music-Tools"

@@ -2,7 +2,7 @@
 
 One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plus a clear **`setup/`** folder that maps which scripts go on which computer.
 
-**Developer: ProOnlyUNO** · v1.2.0
+**Developer: ProOnlyUNO** · v1.0.0
 
 1. **Download** — YouTube playlist/album URL → pick tracks → MP3 (via **yt-dlp**)
 2. **Convert** — MP3 / WAV / FLAC / … → `.dfpwm`
