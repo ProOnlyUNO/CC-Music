@@ -73,6 +73,7 @@ python -m PyInstaller ^
   --hidden-import convert_core ^
   --hidden-import download_core ^
   --hidden-import lyrics_core ^
+  --hidden-import name_sanitize ^
   --hidden-import yt_dlp ^
   --collect-submodules yt_dlp ^
   --hidden-import PIL ^

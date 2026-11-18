@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+from name_sanitize import clean_stem_for_output
+
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".webm", ".wma"}
 
 JUNK_WORDS = {
@@ -74,6 +76,8 @@ def read_tags(ffprobe: str, path: Path) -> dict:
 
 def parse_name(stem: str, title_first: bool = False):
     s = stem if " " in stem else stem.replace("_", " ")
+    # Drop trailing [youtubeId] before junk/artist parsing so titles stay clean.
+    s = clean_stem_for_output(s)
     s = _strip_junk_groups(s)
     s = re.sub(r"\s+", " ", s).strip()
 
@@ -140,10 +144,18 @@ def build_plan(
         if ffprobe:
             tags = read_tags(ffprobe, src)
             if tags.get("title"):
-                title = re.sub(r"\s+", " ", _strip_junk_groups(tags["title"])).strip()
+                title = re.sub(
+                    r"\s+",
+                    " ",
+                    _strip_junk_groups(clean_stem_for_output(tags["title"])),
+                ).strip()
             artist = tags.get("album_artist") or tags.get("artist") or artist
             album = tags.get("album")
-        title = _safe(title, keep_unicode) or _safe(src.stem, keep_unicode) or "Untitled"
+        # Fallback stem also strips [youtubeId] so convert of already-suffixed
+        # downloads (or old libraries) does not keep the ID in .dfpwm names.
+        title = _safe(title, keep_unicode) or _safe(
+            clean_stem_for_output(src.stem), keep_unicode
+        ) or "Untitled"
 
         folder_artist = forced_artist or primary_artist(artist) or "Unsorted"
         folder_artist = _safe(folder_artist, keep_unicode) or "Unsorted"
