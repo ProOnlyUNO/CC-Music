@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/logo.png" alt="CC TOOLS" width="160" />
+</p>
+
 # CC Music
 
 **CC:Tweaked** jukebox + side visualizers + pocket remote, with a Windows desktop helper for YouTube → MP3 download, DFPWM convert, and lyrics.
