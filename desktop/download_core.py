@@ -100,13 +100,55 @@ def _logger(log: LogFn | None):
     return _Quiet()
 
 
-def _entries_from_info(data: dict[str, Any], fallback_url: str, log: LogFn | None) -> tuple[str, list[PlaylistEntry]]:
-    entries_raw = data.get("entries") or []
+_LIST_ID_RE = re.compile(r"(?:[?&]list=)([\w-]+)", re.IGNORECASE)
+_WATCH_V_RE = re.compile(r"(?:[?&]v=)([\w-]{6,})", re.IGNORECASE)
+
+
+def playlist_id_from_url(url: str) -> str | None:
+    m = _LIST_ID_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def normalize_playlist_url(url: str) -> tuple[str, bool]:
+    """Prefer a canonical playlist URL when list= is present.
+
+    watch?v=…&list=… often resolves as a single video unless rewritten.
+    Returns (url_to_fetch, had_playlist_id).
+    """
+    url = (url or "").strip()
+    list_id = playlist_id_from_url(url)
+    if not list_id:
+        return url, False
+    # Keep YouTube Music / other hosts if already a playlist path
+    if "playlist" in url.lower() and f"list={list_id}" in url:
+        return url, True
+    return f"https://www.youtube.com/playlist?list={list_id}", True
+
+
+def _entries_from_info(
+    data: dict[str, Any],
+    fallback_url: str,
+    log: LogFn | None,
+    *,
+    expect_playlist: bool = False,
+) -> tuple[str, list[PlaylistEntry]]:
+    entries_raw = data.get("entries")
+    if entries_raw is None:
+        entries_raw = []
+    elif not isinstance(entries_raw, list):
+        entries_raw = list(entries_raw)
+
     playlist_title = str(data.get("title") or data.get("id") or "YouTube playlist").strip()
     webpage = str(data.get("webpage_url") or data.get("original_url") or fallback_url)
+    data_type = str(data.get("_type") or "").lower()
 
-    if not entries_raw and data.get("id"):
+    # Only collapse to a single video when the user did not ask for a playlist.
+    if not entries_raw and data.get("id") and not expect_playlist and data_type in ("", "video", "url"):
         entries_raw = [data]
+    elif not entries_raw and expect_playlist:
+        # Avoid the old bug: treating the playlist object itself as one "track".
+        if log:
+            log("  yt-dlp returned no flat entries for this playlist URL.")
 
     entries: list[PlaylistEntry] = []
     for i, raw in enumerate(entries_raw, start=1):
@@ -117,6 +159,9 @@ def _entries_from_info(data: dict[str, Any], fallback_url: str, log: LogFn | Non
         if title in ("[Deleted video]", "[Private video]") or not vid:
             if log:
                 log(f"  skip #{i}: {title or '(missing id)'}")
+            continue
+        # Skip url-opaque playlist stubs that have no video id shape
+        if raw.get("_type") in ("playlist", "multi_video"):
             continue
         entry_url = str(raw.get("url") or raw.get("webpage_url") or "").strip()
         if not entry_url.startswith("http"):
@@ -143,58 +188,113 @@ def _entries_from_info(data: dict[str, Any], fallback_url: str, log: LogFn | Non
     return playlist_title, entries
 
 
+def _extract_flat_api(yt_dlp, url: str, log: LogFn | None) -> dict[str, Any]:
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": "in_playlist",
+        "skip_download": True,
+        "noplaylist": False,
+        "ignoreerrors": True,
+        "logger": _logger(log),
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        data = ydl.extract_info(url, download=False)
+    if not isinstance(data, dict):
+        raise RuntimeError("Unexpected yt-dlp response (expected playlist object).")
+    return data
+
+
+def _extract_flat_exe(exe: str, url: str) -> dict[str, Any]:
+    import json
+
+    r = subprocess.run(
+        [
+            exe,
+            "--flat-playlist",
+            "--yes-playlist",
+            "--ignore-errors",
+            "--no-warnings",
+            "-J",
+            "--no-download",
+            "--",
+            url,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    raw_out = (r.stdout or "").strip()
+    if r.returncode != 0 and not raw_out:
+        err = (r.stderr or r.stdout or "").strip()
+        lines = [ln for ln in err.splitlines() if ln.strip()]
+        raise RuntimeError("\n".join(lines[-12:]) if lines else f"exit {r.returncode}")
+    data = json.loads(raw_out or "{}")
+    if not isinstance(data, dict):
+        raise RuntimeError("Unexpected yt-dlp response (expected playlist object).")
+    return data
+
+
 def list_playlist(url: str, log: LogFn | None = None) -> tuple[str, list[PlaylistEntry]]:
     """Fetch flat playlist metadata. Returns (playlist_title, entries)."""
-    url = (url or "").strip()
-    if not url:
+    original = (url or "").strip()
+    if not original:
         raise ValueError("Paste a YouTube playlist or album URL first.")
 
     ok, msg = check_yt_dlp()
     if not ok:
         raise RuntimeError(msg)
 
+    fetch_url, expect_playlist = normalize_playlist_url(original)
     if log:
         log(f"Fetching playlist via {msg}…")
+        if expect_playlist and fetch_url != original:
+            log(f"  Using flat playlist URL (list=): {fetch_url}")
 
     yt_dlp = _import_yt_dlp()
+    data: dict[str, Any]
     if yt_dlp is not None:
-        opts = {
-            "quiet": True,
-            "no_warnings": True,
-            "extract_flat": True,
-            "skip_download": True,
-            "logger": _logger(log),
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            data = ydl.extract_info(url, download=False)
-        if not isinstance(data, dict):
-            raise RuntimeError("Unexpected yt-dlp response (expected playlist object).")
-        playlist_title, entries = _entries_from_info(data, url, log)
+        data = _extract_flat_api(yt_dlp, fetch_url, log)
     else:
         exe = find_yt_dlp_exe()
         assert exe
-        r = subprocess.run(
-            [exe, "--flat-playlist", "--no-warnings", "-J", "--no-download", url],
-            capture_output=True,
-            text=True,
-        )
-        if r.returncode != 0:
-            err = (r.stderr or r.stdout or "").strip()
-            lines = [ln for ln in err.splitlines() if ln.strip()]
-            raise RuntimeError("\n".join(lines[-12:]) if lines else f"exit {r.returncode}")
-        import json
+        data = _extract_flat_exe(exe, fetch_url)
 
-        data = json.loads((r.stdout or "").strip() or "{}")
-        if not isinstance(data, dict):
-            raise RuntimeError("Unexpected yt-dlp response (expected playlist object).")
-        playlist_title, entries = _entries_from_info(data, url, log)
+    playlist_title, entries = _entries_from_info(
+        data, fetch_url, log, expect_playlist=expect_playlist
+    )
+
+    # If playlist URL failed / empty but the user pasted watch?v=&list=, try the
+    # original once more only when it was already a playlist path; otherwise
+    # fall back to single-video listing from the watch URL so Download still works.
+    if not entries and expect_playlist:
+        watch = _WATCH_V_RE.search(original)
+        if watch and log:
+            log(
+                "  Playlist had no entries (private, deleted, or blocked). "
+                "Falling back to the single video from this link."
+            )
+        if watch:
+            single = f"https://www.youtube.com/watch?v={watch.group(1)}"
+            if yt_dlp is not None:
+                data = _extract_flat_api(yt_dlp, single, log)
+            else:
+                exe = find_yt_dlp_exe()
+                assert exe
+                data = _extract_flat_exe(exe, single)
+            playlist_title, entries = _entries_from_info(
+                data, single, log, expect_playlist=False
+            )
 
     if log:
         log(f"Playlist: {playlist_title}")
         log(f"Found {len(entries)} downloadable track(s).")
 
     if not entries:
-        raise RuntimeError("No downloadable tracks found in that URL.")
+        raise RuntimeError(
+            "No downloadable tracks found in that URL. "
+            "If this is a playlist, open it on YouTube and confirm it is public, "
+            "then paste the playlist URL (youtube.com/playlist?list=…)."
+        )
 
     return playlist_title, entries
 

@@ -52,13 +52,23 @@ if exist build rmdir /s /q build
 if exist dist\CC_Music_Tools.exe del /f /q dist\CC_Music_Tools.exe
 if exist CC_Music_Tools.spec del /f /q CC_Music_Tools.spec
 
-echo Running PyInstaller (one-file, windowed, with assets)...
+if not exist assets\app-icon.ico (
+  echo Building assets\app-icon.ico from app-icon.png...
+  python _make_icon.py
+  if errorlevel 1 (
+    echo ERROR: could not build app-icon.ico
+    exit /b 1
+  )
+)
+
+echo Running PyInstaller (one-file, windowed, with assets + icon)...
 python -m PyInstaller ^
   --noconfirm ^
   --clean ^
   --onefile ^
   --windowed ^
   --name CC_Music_Tools ^
+  --icon "assets\app-icon.ico" ^
   --add-data "assets;assets" ^
   --hidden-import convert_core ^
   --hidden-import download_core ^

@@ -2,7 +2,7 @@
 
 One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plus a clear **`setup/`** folder that maps which scripts go on which computer.
 
-**Developer: ProOnlyUNO** · v1.1.1
+**Developer: ProOnlyUNO** · v1.2.0
 
 1. **Download** — YouTube playlist/album URL → pick tracks → MP3 (via **yt-dlp**)
 2. **Convert** — MP3 / WAV / FLAC / … → `.dfpwm`
@@ -11,18 +11,15 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 
 ## Quick start (Setup.exe)
 
-1. Install **ffmpeg 5.1+** (needed for Convert and for MP3 extract):
+1. Double-click **`Setup.exe`**.
+2. Choose where to put CC Music Tools (default: `Documents\CC-Music-Tools`).
+3. Leave **Install / ensure ffmpeg + yt-dlp** checked (Convert + YouTube Download need them).
+4. Optional Start Menu / Desktop shortcuts → **Install**.
+5. Setup reports whether ffmpeg / yt-dlp succeeded. If either failed:
    ```text
    winget install ffmpeg
-   ```
-2. Install **yt-dlp** if you will use the Download tab:
-   ```text
    python -m pip install -U yt-dlp
    ```
-   Or: `winget install yt-dlp.yt-dlp`
-3. Double-click **`Setup.exe`**.
-4. Choose where to put CC Music Tools (default: `Documents\CC-Music-Tools`).
-5. Optional Start Menu / Desktop shortcuts → **Install**.
 6. Open the app. Your install folder also gets **`setup/`** (in-game scripts).
 
 Dev shortcut: double-click **`dist\CC_Music_Tools.exe`**.

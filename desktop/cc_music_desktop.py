@@ -27,7 +27,7 @@ import download_core
 import lyrics_core
 
 APP_TITLE = "CC Music Tools"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 DEVELOPER = "ProOnlyUNO"
 
 
@@ -50,20 +50,25 @@ DEFAULT_CONVERT_OUT = APP_DIR / "dfpwm_out"
 DEFAULT_LYRICS_PACK = APP_DIR / "lyrics_pack"
 YTMP3_ALT_URL = "https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz"
 
-# Matrix / binary cyan theme
+# Matrix / binary cyan — glass panels (semi-transparent look over the bg)
 COLORS = {
     "bg_deep": "#050b10",
-    "panel": "#0a1520",
-    "panel_hi": "#102033",
-    "border": "#1a3a4a",
-    "text": "#d7fff4",
-    "text_dim": "#8fbfb0",
-    "accent": "#3dffc8",
-    "entry_bg": "#071018",
-    "entry_fg": "#e8fff8",
-    "log_bg": "#04090e",
-    "log_fg": "#b8ffe8",
-    "scrim": (4, 10, 16),
+    "panel": "#0b1824",
+    "panel_hi": "#123048",
+    "panel_glass": "#0a1a28",
+    "border": "#2a6a78",
+    "border_soft": "#1a4050",
+    "text": "#e6fff8",
+    "text_dim": "#9fd4c4",
+    "accent": "#4affe0",
+    "entry_bg": "#06141e",
+    "entry_fg": "#f0fffa",
+    "log_bg": "#041018",
+    "log_fg": "#c8ffe8",
+    "scrim": (3, 12, 18),
+    # RGBA glass overlays drawn onto the Matrix background
+    "glass_fill": (8, 28, 40, 118),
+    "glass_edge": (60, 220, 200, 70),
 }
 
 
@@ -78,6 +83,33 @@ def find_asset(*names: str) -> Path | None:
     return None
 
 
+def apply_window_icon(root: tk.Tk | tk.Toplevel) -> None:
+    """Set taskbar/title-bar icon from bundled assets (ico + png)."""
+    ico = find_asset("app-icon.ico")
+    png = find_asset("app-icon.png")
+    if ico is not None:
+        try:
+            root.iconbitmap(default=str(ico))
+        except tk.TclError:
+            try:
+                root.iconbitmap(str(ico))
+            except tk.TclError:
+                pass
+    if png is not None:
+        try:
+            from PIL import Image, ImageTk
+
+            img = Image.open(png).convert("RGBA")
+            # Keep a few sizes for Windows taskbar / alt-tab
+            photos: list = []
+            for edge in (16, 32, 48, 64, 128, 256):
+                photos.append(ImageTk.PhotoImage(img.resize((edge, edge), Image.Resampling.LANCZOS)))
+            root.iconphoto(True, *photos)
+            root._icon_photos = photos  # noqa: SLF001 — keep refs alive
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -85,6 +117,7 @@ class App(tk.Tk):
         self.minsize(720, 560)
         self.geometry("820x640")
         self.configure(bg=COLORS["bg_deep"])
+        apply_window_icon(self)
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
         self._cancel = False
@@ -115,27 +148,65 @@ class App(tk.Tk):
     def _compose_background(self, width: int, height: int):
         if self._bg_src is None or width < 40 or height < 40:
             return None
-        from PIL import Image, ImageDraw, ImageEnhance, ImageTk
+        from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageTk
 
         img = self._bg_src.resize((width, height), Image.Resampling.LANCZOS)
-        # Slight overall darken so panels stay readable
-        img = ImageEnhance.Brightness(img).enhance(0.72)
+        # Keep the Matrix binary bright so it reads through glass panels
+        img = ImageEnhance.Brightness(img).enhance(0.92)
+        img = ImageEnhance.Contrast(img).enhance(1.08)
+        base = img.convert("RGBA")
         overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         scrim = COLORS["scrim"]
-        # Dark scrim over the brighter top band; fade into the naturally darker lower area
-        top_h = max(120, int(height * 0.42))
+        # Light scrim only — Matrix stays visible behind the UI
+        top_h = max(80, int(height * 0.28))
         for y in range(top_h):
             t = y / max(1, top_h - 1)
-            alpha = int(200 * (1.0 - t * 0.55))
+            alpha = int(110 * (1.0 - t * 0.7))
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
-        # Soft dark veil on the lower third so light text / log stay crisp
-        bot0 = int(height * 0.55)
+        bot0 = int(height * 0.72)
         for y in range(bot0, height):
             t = (y - bot0) / max(1, height - bot0)
-            alpha = int(90 + 110 * t)
+            alpha = int(40 + 70 * t)
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
-        composed = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+        # Frosted glass panels (content shell + log strip) — translucent so binary shows through
+        glass = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        gdraw = ImageDraw.Draw(glass)
+        mx, my = int(width * 0.03), int(height * 0.03)
+        mw, mh = int(width * 0.94), int(height * 0.94)
+        # Soft blur plate under the shell
+        plate = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        pdraw = ImageDraw.Draw(plate)
+        pdraw.rounded_rectangle(
+            [mx, my, mx + mw, my + mh],
+            radius=18,
+            fill=COLORS["glass_fill"],
+            outline=COLORS["glass_edge"],
+            width=2,
+        )
+        # Inner tab well — slightly clearer glass
+        tab_top = my + int(height * 0.09)
+        tab_bot = my + int(height * 0.62)
+        pdraw.rounded_rectangle(
+            [mx + 14, tab_top, mx + mw - 14, tab_bot],
+            radius=12,
+            fill=(6, 22, 34, 90),
+            outline=(80, 230, 210, 55),
+            width=1,
+        )
+        # Log strip
+        log_top = my + int(height * 0.66)
+        pdraw.rounded_rectangle(
+            [mx + 14, log_top, mx + mw - 14, my + mh - 14],
+            radius=12,
+            fill=(4, 16, 26, 130),
+            outline=(80, 230, 210, 45),
+            width=1,
+        )
+        plate = plate.filter(ImageFilter.GaussianBlur(radius=0.6))
+        glass = Image.alpha_composite(glass, plate)
+        composed = Image.alpha_composite(Image.alpha_composite(base, overlay), glass).convert("RGB")
         return ImageTk.PhotoImage(composed)
 
     def _on_resize(self, event: tk.Event) -> None:
@@ -162,6 +233,9 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
+        # Near-deep backgrounds so canvas glass + Matrix read through the chrome
+        deep = COLORS["bg_deep"]
+        glass = COLORS["panel_glass"]
         bg = COLORS["panel"]
         bg2 = COLORS["panel_hi"]
         fg = COLORS["text"]
@@ -170,30 +244,73 @@ class App(tk.Tk):
         entry_bg = COLORS["entry_bg"]
         border = COLORS["border"]
 
-        style.configure(".", background=bg, foreground=fg, fieldbackground=entry_bg, bordercolor=border)
-        style.configure("TFrame", background=bg)
-        style.configure("Card.TFrame", background=bg)
-        style.configure("Header.TFrame", background=COLORS["bg_deep"])
-        style.configure("TLabel", background=bg, foreground=fg)
-        style.configure("Header.TLabel", background=COLORS["bg_deep"], foreground=accent, font=("Segoe UI Semibold", 16))
-        style.configure("Subhead.TLabel", background=COLORS["bg_deep"], foreground=dim, font=("Segoe UI", 9))
-        style.configure("Dim.TLabel", background=bg, foreground=dim)
-        style.configure("TButton", background=bg2, foreground=fg, bordercolor=border, focusthickness=1)
-        style.map("TButton", background=[("active", "#16324a"), ("disabled", "#0a1520")], foreground=[("disabled", "#557788")])
-        style.configure("TCheckbutton", background=bg, foreground=fg)
-        style.map("TCheckbutton", background=[("active", bg)], foreground=[("active", accent)])
-        style.configure("TEntry", fieldbackground=entry_bg, foreground=COLORS["entry_fg"], insertcolor=COLORS["entry_fg"])
-        style.configure("TLabelframe", background=bg, foreground=accent, bordercolor=border)
-        style.configure("TLabelframe.Label", background=bg, foreground=accent)
-        style.configure("TNotebook", background=COLORS["bg_deep"], borderwidth=0)
-        style.configure("TNotebook.Tab", background=bg2, foreground=dim, padding=(12, 6))
+        style.configure(".", background=glass, foreground=fg, fieldbackground=entry_bg, bordercolor=border)
+        style.configure("TFrame", background=glass)
+        # Empty layouts = no opaque flat fill; Matrix/glass on the canvas shows through
+        style.layout("Glass.TFrame", [])
+        style.layout("Card.TFrame", [])
+        style.layout("Header.TFrame", [])
+        style.configure("Glass.TFrame", background=deep)
+        style.configure("Card.TFrame", background=glass)
+        style.configure("Header.TFrame", background=deep)
+        style.configure("TLabel", background=deep, foreground=fg)
+        style.configure(
+            "Header.TLabel",
+            background=deep,
+            foreground=accent,
+            font=("Segoe UI Semibold", 17),
+        )
+        style.configure("Subhead.TLabel", background=deep, foreground=dim, font=("Segoe UI", 9))
+        style.configure("Dim.TLabel", background=deep, foreground=dim)
+        style.configure("Glass.TLabel", background=deep, foreground=fg)
+
+        style.configure(
+            "TButton",
+            background=bg2,
+            foreground=fg,
+            bordercolor=border,
+            focusthickness=1,
+            padding=(10, 4),
+        )
+        style.map(
+            "TButton",
+            background=[("active", "#1a4a62"), ("disabled", "#0a1822")],
+            foreground=[("disabled", "#557788")],
+        )
+        style.configure("TCheckbutton", background=deep, foreground=fg)
+        style.map(
+            "TCheckbutton",
+            background=[("active", deep), ("selected", deep)],
+            foreground=[("active", accent), ("selected", accent)],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground=entry_bg,
+            foreground=COLORS["entry_fg"],
+            insertcolor=COLORS["entry_fg"],
+            bordercolor=COLORS["border_soft"],
+        )
+        style.configure("TLabelframe", background=deep, foreground=accent, bordercolor=border)
+        style.configure("TLabelframe.Label", background=deep, foreground=accent)
+        style.configure("TNotebook", background=deep, borderwidth=0, tabmargins=(6, 4, 6, 0))
+        # Translucent-feeling tabs — dark cyan glass, selected pops with accent text
+        style.configure(
+            "TNotebook.Tab",
+            background="#0c3040",
+            foreground=dim,
+            padding=(14, 7),
+            borderwidth=0,
+            lightcolor=border,
+            darkcolor=deep,
+        )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", bg), ("active", "#143044")],
+            background=[("selected", "#154858"), ("active", "#1a5568")],
             foreground=[("selected", accent), ("active", fg)],
         )
-        style.configure("Horizontal.TScrollbar", background=bg2, troughcolor=COLORS["bg_deep"], bordercolor=border)
-        style.configure("Vertical.TScrollbar", background=bg2, troughcolor=COLORS["bg_deep"], bordercolor=border)
+
+        style.configure("Horizontal.TScrollbar", background=bg2, troughcolor=deep, bordercolor=border)
+        style.configure("Vertical.TScrollbar", background=bg2, troughcolor=deep, bordercolor=border)
 
     def _build(self) -> None:
         self._apply_style()
@@ -201,10 +318,11 @@ class App(tk.Tk):
         self._bg_canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=COLORS["bg_deep"])
         self._bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
 
-        shell = ttk.Frame(self, style="Card.TFrame", padding=0)
-        shell.place(relx=0.02, rely=0.02, relwidth=0.96, relheight=0.96)
+        # Glass shell — deep bg so frosted Matrix on the canvas reads through
+        shell = ttk.Frame(self, style="Glass.TFrame", padding=0)
+        shell.place(relx=0.03, rely=0.03, relwidth=0.94, relheight=0.94)
 
-        header = ttk.Frame(shell, style="Header.TFrame", padding=(12, 10, 12, 6))
+        header = ttk.Frame(shell, style="Header.TFrame", padding=(14, 12, 14, 6))
         header.pack(fill="x")
         ttk.Label(header, text=APP_TITLE, style="Header.TLabel").pack(anchor="w")
         ttk.Label(
@@ -214,7 +332,7 @@ class App(tk.Tk):
         ).pack(anchor="w")
 
         nb = ttk.Notebook(shell)
-        nb.pack(fill="both", expand=True, padx=12, pady=(4, 0))
+        nb.pack(fill="both", expand=True, padx=14, pady=(6, 0))
         self._notebook = nb
 
         self.tab_download = ttk.Frame(nb, padding=10, style="Card.TFrame")
@@ -234,10 +352,10 @@ class App(tk.Tk):
         self._build_help(self.tab_help)
         self._build_commands(self.tab_commands)
 
-        bottom = ttk.Frame(shell, style="Card.TFrame", padding=(12, 8, 12, 12))
+        bottom = ttk.Frame(shell, style="Glass.TFrame", padding=(14, 8, 14, 12))
         bottom.pack(fill="both", expand=False)
 
-        row = ttk.Frame(bottom, style="Card.TFrame")
+        row = ttk.Frame(bottom, style="Glass.TFrame")
         row.pack(fill="x")
         ttk.Label(row, text="Progress log", font=("Segoe UI Semibold", 10)).pack(side="left")
         self.btn_open = ttk.Button(row, text="Open output folder", command=self._open_output)
@@ -245,11 +363,11 @@ class App(tk.Tk):
         self.btn_cancel = ttk.Button(row, text="Cancel", command=self._request_cancel, state="disabled")
         self.btn_cancel.pack(side="right")
 
-        log_frame = ttk.Frame(bottom, style="Card.TFrame")
+        log_frame = ttk.Frame(bottom, style="Glass.TFrame")
         log_frame.pack(fill="both", expand=True, pady=(6, 0))
         self.log = tk.Text(
             log_frame,
-            height=12,
+            height=11,
             wrap="word",
             font=("Consolas", 9),
             state="disabled",

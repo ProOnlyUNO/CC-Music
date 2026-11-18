@@ -4,6 +4,9 @@ CC Music Tools Setup — freestanding Windows installer (no paid license).
 
 Copies CC_Music_Tools.exe + assets + README + setup/ (in-game script map)
 into a user-chosen folder. Optional Start Menu and Desktop shortcuts.
+
+After Install, tries to ensure ffmpeg + yt-dlp (Convert / YouTube Download)
+via winget, pip, or choco when available — and reports success/fail clearly.
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "CC Music Tools"
+APP_VERSION = "1.2.0"
 EXE_NAME = "CC_Music_Tools.exe"
 DEFAULT_DIR = Path.home() / "Documents" / "CC-Music-Tools"
 PROGRAM_FILES = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "CC-Music-Tools"
@@ -80,20 +84,253 @@ $s.Save()
     )
 
 
+def _wh_which(name: str) -> str | None:
+    return shutil.which(name) or shutil.which(f"{name}.exe")
+
+
+def _run(cmd: list[str], timeout: int = 180) -> tuple[bool, str]:
+    try:
+        r = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=False,
+        )
+        out = ((r.stdout or "") + ("\n" + r.stderr if r.stderr else "")).strip()
+        return r.returncode == 0, out
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, str(e)
+
+
+def _ffmpeg_ok() -> tuple[bool, str]:
+    exe = _wh_which("ffmpeg")
+    if not exe:
+        return False, "not found on PATH"
+    ok, out = _run([exe, "-hide_banner", "-version"], timeout=30)
+    first = (out.splitlines() or ["ffmpeg"])[0].strip()
+    return ok, first or exe
+
+
+def _ytdlp_ok() -> tuple[bool, str]:
+    try:
+        import yt_dlp  # type: ignore
+
+        ver = getattr(getattr(yt_dlp, "version", None), "__version__", None) or "module"
+        return True, f"yt-dlp {ver} (Python module)"
+    except ImportError:
+        pass
+    exe = _wh_which("yt-dlp")
+    if not exe:
+        # python -m yt_dlp
+        ok, out = _run([sys.executable, "-m", "yt_dlp", "--version"], timeout=45)
+        if ok:
+            ver = (out.splitlines() or ["ok"])[0].strip()
+            return True, f"yt-dlp {ver} (python -m)"
+        return False, "not found"
+    ok, out = _run([exe, "--version"], timeout=30)
+    ver = (out.splitlines() or [exe])[0].strip()
+    return ok, f"yt-dlp {ver}" if ok else ver
+
+
+def _try_winget_install(package_id: str) -> tuple[bool, str]:
+    winget = _wh_which("winget")
+    if not winget:
+        return False, "winget not available"
+    ok, out = _run(
+        [
+            winget,
+            "install",
+            "--id",
+            package_id,
+            "-e",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+            "--disable-interactivity",
+        ],
+        timeout=300,
+    )
+    # winget exit 0 = installed / already installed
+    if ok:
+        return True, f"winget install {package_id}"
+    # Some wingets return non-zero when already present — check again later
+    return False, (out.splitlines() or [f"winget failed for {package_id}"])[-1][:200]
+
+
+def _try_choco_install(package: str) -> tuple[bool, str]:
+    choco = _wh_which("choco")
+    if not choco:
+        return False, "choco not available"
+    ok, out = _run([choco, "install", package, "-y"], timeout=300)
+    if ok:
+        return True, f"choco install {package}"
+    return False, (out.splitlines() or [f"choco failed for {package}"])[-1][:200]
+
+
+def _try_pip_ytdlp() -> tuple[bool, str]:
+    ok, out = _run(
+        [sys.executable, "-m", "pip", "install", "--upgrade", "yt-dlp"],
+        timeout=300,
+    )
+    if ok:
+        return True, "pip install -U yt-dlp"
+    # Frozen Setup.exe may ship a limited Python — try `py -m pip` launcher
+    py = _wh_which("py")
+    if py:
+        ok2, out2 = _run([py, "-m", "pip", "install", "--upgrade", "yt-dlp"], timeout=300)
+        if ok2:
+            return True, "py -m pip install -U yt-dlp"
+        out = out2 or out
+    return False, (out.splitlines() or ["pip install yt-dlp failed"])[-1][:200]
+
+
+def ensure_runtime_deps(status_cb=None) -> list[str]:
+    """Install/ensure ffmpeg + yt-dlp. Returns human-readable result lines."""
+    lines: list[str] = []
+
+    def note(msg: str) -> None:
+        lines.append(msg)
+        if status_cb:
+            status_cb(msg)
+
+    # --- ffmpeg ---
+    note("Checking ffmpeg…")
+    ok, detail = _ffmpeg_ok()
+    if ok:
+        note(f"✓ ffmpeg: OK — {detail}")
+    else:
+        note("ffmpeg missing — trying winget / choco…")
+        installed = False
+        for label, fn in (
+            ("winget Gyan.FFmpeg", lambda: _try_winget_install("Gyan.FFmpeg")),
+            ("winget ffmpeg", lambda: _try_winget_install("ffmpeg")),
+            ("choco ffmpeg", lambda: _try_choco_install("ffmpeg")),
+        ):
+            ok_i, msg_i = fn()
+            if ok_i:
+                note(f"  tried {label}: {msg_i}")
+                installed = True
+                break
+            note(f"  tried {label}: {msg_i}")
+        # Refresh PATH from typical install locations for this process
+        extra = [
+            Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "ffmpeg" / "bin",
+            Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "ffmpeg" / "bin",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Links",
+        ]
+        path_now = os.environ.get("PATH", "")
+        for p in extra:
+            if p.is_dir() and str(p) not in path_now:
+                os.environ["PATH"] = str(p) + os.pathsep + path_now
+                path_now = os.environ["PATH"]
+        ok2, detail2 = _ffmpeg_ok()
+        if ok2:
+            note(f"✓ ffmpeg: installed — {detail2}")
+        elif installed:
+            note(
+                "✗ ffmpeg: installer ran, but ffmpeg is not on PATH yet. "
+                "Open a new terminal or reboot, then verify: ffmpeg -version"
+            )
+        else:
+            note(
+                "✗ ffmpeg: FAILED to auto-install. "
+                "Install manually:  winget install ffmpeg"
+            )
+
+    # --- yt-dlp ---
+    note("Checking yt-dlp…")
+    ok, detail = _ytdlp_ok()
+    if ok:
+        note(f"✓ yt-dlp: OK — {detail}")
+    else:
+        note("yt-dlp missing — trying pip / winget / choco…")
+        installed = False
+        for label, fn in (
+            ("pip", _try_pip_ytdlp),
+            ("winget yt-dlp.yt-dlp", lambda: _try_winget_install("yt-dlp.yt-dlp")),
+            ("choco yt-dlp", lambda: _try_choco_install("yt-dlp")),
+        ):
+            ok_i, msg_i = fn()
+            if ok_i:
+                note(f"  tried {label}: {msg_i}")
+                installed = True
+                break
+            note(f"  tried {label}: {msg_i}")
+        ok2, detail2 = _ytdlp_ok()
+        if ok2:
+            note(f"✓ yt-dlp: installed — {detail2}")
+        elif installed:
+            note(
+                "✗ yt-dlp: installer ran, but yt-dlp is not visible yet. "
+                "Try:  python -m pip install -U yt-dlp"
+            )
+        else:
+            note(
+                "✗ yt-dlp: FAILED to auto-install. "
+                "Install manually:  python -m pip install -U yt-dlp"
+            )
+
+    return lines
+
+
+def _icon_roots() -> list[Path]:
+    roots = [_bundle_dir(), _setup_exe_dir(), Path(__file__).resolve().parent]
+    payload = locate_payload()
+    if payload is not None:
+        roots.append(payload)
+    return roots
+
+
+def apply_window_icon(root: tk.Misc) -> None:
+    """Set Setup window / taskbar icon from bundled assets."""
+    ico: Path | None = None
+    png: Path | None = None
+    for root_dir in _icon_roots():
+        cand_ico = root_dir / "assets" / "app-icon.ico"
+        cand_png = root_dir / "assets" / "app-icon.png"
+        if ico is None and cand_ico.is_file():
+            ico = cand_ico
+        if png is None and cand_png.is_file():
+            png = cand_png
+    if ico is not None:
+        try:
+            root.iconbitmap(default=str(ico))  # type: ignore[attr-defined]
+        except tk.TclError:
+            try:
+                root.iconbitmap(str(ico))  # type: ignore[attr-defined]
+            except tk.TclError:
+                pass
+    if png is not None:
+        try:
+            from PIL import Image, ImageTk
+
+            img = Image.open(png).convert("RGBA")
+            photos = [
+                ImageTk.PhotoImage(img.resize((edge, edge), Image.Resampling.LANCZOS))
+                for edge in (16, 32, 48, 64, 256)
+            ]
+            root.iconphoto(True, *photos)  # type: ignore[attr-defined]
+            root._icon_photos = photos  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
 class SetupApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"{APP_NAME} Setup")
+        self.title(f"{APP_NAME} Setup  ·  v{APP_VERSION}")
         # Tall enough that Install/Cancel stay visible under DPI scaling.
-        self.geometry("580x480")
-        self.minsize(560, 460)
+        self.geometry("580x520")
+        self.minsize(560, 500)
         self.resizable(True, True)
+        apply_window_icon(self)
 
         self.payload = locate_payload()
         self.dest = tk.StringVar(value=str(DEFAULT_DIR))
         self.start_menu = tk.BooleanVar(value=True)
         self.desktop = tk.BooleanVar(value=True)
         self.launch_after = tk.BooleanVar(value=True)
+        self.install_deps = tk.BooleanVar(value=True)
 
         self._build()
         if self.payload is None:
@@ -126,7 +363,7 @@ class SetupApp(tk.Tk):
         ttk.Label(body, text=f"{APP_NAME} Setup", font=("Segoe UI Semibold", 16)).pack(anchor="w")
         ttk.Label(
             body,
-            text="Choose where to install the app. Setup copies the exe, assets, and README.",
+            text="Choose where to install the app. Setup copies the exe, assets, README, and setup/ scripts.",
             wraplength=520,
         ).pack(anchor="w", pady=(4, 12))
 
@@ -146,10 +383,15 @@ class SetupApp(tk.Tk):
             side="left", padx=(8, 0)
         )
 
-        opts = ttk.LabelFrame(body, text="Shortcuts", padding=10)
+        opts = ttk.LabelFrame(body, text="Options", padding=10)
         opts.pack(fill="x", pady=(12, 0))
         ttk.Checkbutton(opts, text="Start Menu shortcut", variable=self.start_menu).pack(anchor="w")
         ttk.Checkbutton(opts, text="Desktop shortcut", variable=self.desktop).pack(anchor="w")
+        ttk.Checkbutton(
+            opts,
+            text="Install / ensure ffmpeg + yt-dlp (needed for Convert & YouTube Download)",
+            variable=self.install_deps,
+        ).pack(anchor="w", pady=(4, 0))
         ttk.Checkbutton(opts, text="Launch CC Music Tools when finished", variable=self.launch_after).pack(
             anchor="w", pady=(4, 0)
         )
@@ -250,8 +492,37 @@ class SetupApp(tk.Tk):
             self.status.configure(text="Install failed.")
             return
 
+        dep_lines: list[str] = []
+        if self.install_deps.get():
+            self.status.configure(text="Installing dependencies (ffmpeg + yt-dlp)…")
+            self.update_idletasks()
+
+            def _status(msg: str) -> None:
+                # Keep UI alive during winget/pip
+                short = msg if len(msg) < 90 else msg[:87] + "…"
+                self.status.configure(text=short)
+                self.update_idletasks()
+
+            try:
+                dep_lines = ensure_runtime_deps(status_cb=_status)
+            except Exception as e:  # noqa: BLE001
+                dep_lines = [f"✗ Dependency step crashed: {e}"]
+
         self.status.configure(text=f"Installed to {dest}")
-        messagebox.showinfo(APP_NAME, f"Installed successfully to:\n{dest}")
+        summary = f"Installed successfully to:\n{dest}\n"
+        if dep_lines:
+            summary += "\nDependencies:\n" + "\n".join(dep_lines)
+            summary += (
+                "\n\nConvert and YouTube Download need ffmpeg + yt-dlp. "
+                "If anything failed above, install manually then restart the app."
+            )
+        else:
+            summary += (
+                "\nSkipped dependency install. For Convert / Download, install:\n"
+                "  winget install ffmpeg\n"
+                "  python -m pip install -U yt-dlp"
+            )
+        messagebox.showinfo(APP_NAME, summary)
         if self.launch_after.get():
             try:
                 os.startfile(str(dest / EXE_NAME))  # type: ignore[attr-defined]
