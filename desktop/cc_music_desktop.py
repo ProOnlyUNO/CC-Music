@@ -438,6 +438,15 @@ class App(tk.Tk):
 
         style.configure("Horizontal.TScrollbar", background=bg2, troughcolor=key, bordercolor=border)
         style.configure("Vertical.TScrollbar", background=bg2, troughcolor=key, bordercolor=border)
+        style.configure(
+            "Glass.Horizontal.TProgressbar",
+            troughcolor="#06141c",
+            background=accent,
+            bordercolor=border,
+            lightcolor=accent,
+            darkcolor="#176878",
+            thickness=12,
+        )
 
     def _build(self) -> None:
         self._apply_style()
@@ -503,6 +512,36 @@ class App(tk.Tk):
 
         bottom = ttk.Frame(shell, style="Glass.TFrame", padding=(14, 8, 14, 12))
         bottom.pack(fill="both", expand=False)
+
+        # Dual progress bars — overall job + current track / step
+        prog = ttk.Frame(bottom, style="Glass.TFrame")
+        prog.pack(fill="x", pady=(0, 6))
+        self.prog_overall_var = tk.DoubleVar(value=0.0)
+        self.prog_track_var = tk.DoubleVar(value=0.0)
+        self.prog_detail = tk.StringVar(value="")
+        ttk.Label(prog, text="Overall", style="Dim.TLabel", width=8).grid(row=0, column=0, sticky="w")
+        self.prog_overall = ttk.Progressbar(
+            prog,
+            style="Glass.Horizontal.TProgressbar",
+            variable=self.prog_overall_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.prog_overall.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Label(prog, text="Current", style="Dim.TLabel", width=8).grid(row=1, column=0, sticky="w")
+        self.prog_track = ttk.Progressbar(
+            prog,
+            style="Glass.Horizontal.TProgressbar",
+            variable=self.prog_track_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.prog_track.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=2)
+        ttk.Label(prog, textvariable=self.prog_detail, style="Dim.TLabel").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(2, 0)
+        )
+        prog.columnconfigure(1, weight=1)
+        self._progress_pulse_id: str | None = None
 
         row = ttk.Frame(bottom, style="Glass.TFrame")
         row.pack(fill="x")
@@ -935,14 +974,83 @@ You’re set — enjoy the music.
     def _ui_log(self, msg: str) -> None:
         self._log_q.put(msg)
 
+    def _stop_progress_pulse(self) -> None:
+        if self._progress_pulse_id is not None:
+            try:
+                self.after_cancel(self._progress_pulse_id)
+            except Exception:  # noqa: BLE001
+                pass
+            self._progress_pulse_id = None
+
+    def _reset_progress(self) -> None:
+        self._stop_progress_pulse()
+        for bar in (self.prog_overall, self.prog_track):
+            bar.stop()
+            bar.configure(mode="determinate")
+        self.prog_overall_var.set(0)
+        self.prog_track_var.set(0)
+        self.prog_detail.set("")
+
+    def _set_progress(
+        self,
+        phase: str,
+        frac: float | None,
+        detail: str,
+    ) -> None:
+        """Update progress bars from a worker thread (marshalled to UI)."""
+
+        def apply() -> None:
+            self.prog_detail.set(detail)
+            # Overall bar
+            if phase in ("overall", "fetch", "organize", "convert", "lyrics_batch"):
+                if frac is None:
+                    if str(self.prog_overall["mode"]) != "indeterminate":
+                        self.prog_overall.configure(mode="indeterminate")
+                        self.prog_overall.start(12)
+                else:
+                    if str(self.prog_overall["mode"]) != "determinate":
+                        self.prog_overall.stop()
+                        self.prog_overall.configure(mode="determinate")
+                    self.prog_overall_var.set(max(0.0, min(100.0, frac * 100.0)))
+            # Current / track bar
+            if phase in ("track", "lyrics", "fetch"):
+                if frac is None:
+                    if str(self.prog_track["mode"]) != "indeterminate":
+                        self.prog_track.configure(mode="indeterminate")
+                        self.prog_track.start(10)
+                else:
+                    if str(self.prog_track["mode"]) != "determinate":
+                        self.prog_track.stop()
+                        self.prog_track.configure(mode="determinate")
+                    self.prog_track_var.set(max(0.0, min(100.0, frac * 100.0)))
+            elif phase in ("organize", "convert", "lyrics_batch", "overall"):
+                # Mirror overall into current when there's no separate track metric
+                if phase != "overall" and frac is not None:
+                    if str(self.prog_track["mode"]) != "determinate":
+                        self.prog_track.stop()
+                        self.prog_track.configure(mode="determinate")
+                    self.prog_track_var.set(max(0.0, min(100.0, frac * 100.0)))
+            short = detail if len(detail) < 90 else detail[:87] + "…"
+            self.status.configure(text=short)
+
+        self.after(0, apply)
+
+    def _ui_progress(self, phase: str, frac: float | None, detail: str) -> None:
+        self._set_progress(phase, frac, detail)
+
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.btn_cancel.configure(state="normal" if busy else "disabled")
-        self.status.configure(text="Working…" if busy else "Ready")
+        if busy:
+            self.status.configure(text="Working…")
+        else:
+            self._reset_progress()
+            self.status.configure(text="Ready")
 
     def _request_cancel(self) -> None:
         self._cancel = True
         self._ui_log("Cancel requested…")
+        self.prog_detail.set("Cancel requested…")
 
     def _open_output(self) -> None:
         target = self._last_out
@@ -975,14 +1083,20 @@ You’re set — enjoy the music.
         self._set_busy(True)
         self._append_log("--- Download: fetch titles ---")
         self.dl_status.set("Fetching playlist…")
+        self._ui_progress("fetch", None, "Fetching playlist titles…")
 
         def work() -> None:
             try:
-                title, entries = download_core.list_playlist(url, log=self._ui_log)
+                title, entries = download_core.list_playlist(
+                    url, log=self._ui_log, progress=self._ui_progress
+                )
 
                 def apply() -> None:
                     self._playlist_title = title
                     self._populate_track_list(entries)
+                    self._ui_progress(
+                        "fetch", 1.0, f"Loaded {len(entries)} track(s) — {title}"
+                    )
                     self._set_busy(False)
 
                 self.after(0, apply)
@@ -1033,6 +1147,7 @@ You’re set — enjoy the music.
         self._append_log("--- Download: MP3 + lyrics ---")
         self._last_out = Path(out)
         self.dl_status.set(f"Downloading {len(selected)} track(s)…")
+        self._ui_progress("overall", 0.0, f"Starting download — {len(selected)} track(s)")
         playlist_title = self._playlist_title
 
         def work() -> None:
@@ -1043,42 +1158,62 @@ You’re set — enjoy the music.
                     playlist_title=playlist_title,
                     fetch_lyrics=True,
                     log=self._ui_log,
+                    progress=self._ui_progress,
                     should_cancel=lambda: self._cancel,
                 )
 
-                def done() -> None:
+                def after_download() -> None:
                     self.dl_status.set(f"Saved {ok}, failed {fail} → {folder}")
-                    self._set_busy(False)
                     final_folder = folder
                     if ok > 0 and tracks:
                         lib = self._prompt_organize_root()
                         if lib is not None:
                             self._append_log("--- Organize: Artist/Album ---")
-                            try:
-                                final_folder = download_core.organize_tracks(
-                                    tracks, lib, log=self._ui_log
-                                )
-                                self.dl_out.set(str(final_folder))
-                                self._last_out = final_folder
-                                self.dl_status.set(
-                                    f"Organized {ok} track(s) → {final_folder}"
-                                )
-                            except Exception as e:  # noqa: BLE001
-                                self._append_log(f"ERROR organizing: {e}")
-                                messagebox.showerror(
-                                    APP_TITLE, f"Could not organize into Artist/Album:\n{e}"
-                                )
-                        if messagebox.askyesno(
-                            APP_TITLE,
-                            f"Downloaded {ok} MP3(s)"
-                            + (" with lyrics where matched." if ok else ".")
-                            + f"\n\nFolder:\n{final_folder}\n\n"
-                            "Send this folder to the Convert tab?",
-                        ):
-                            self.dl_out.set(str(final_folder))
-                            self._handoff_to_convert()
+                            self._ui_progress(
+                                "organize", 0.0, "Organizing into Artist/Album…"
+                            )
+                            # Keep busy while organize runs on a worker
+                            def org_work() -> None:
+                                try:
+                                    dest = download_core.organize_tracks(
+                                        tracks,
+                                        lib,
+                                        log=self._ui_log,
+                                        progress=self._ui_progress,
+                                    )
 
-                self.after(0, done)
+                                    def org_done() -> None:
+                                        nonlocal final_folder
+                                        final_folder = dest
+                                        self.dl_out.set(str(final_folder))
+                                        self._last_out = final_folder
+                                        self.dl_status.set(
+                                            f"Organized {ok} track(s) → {final_folder}"
+                                        )
+                                        self._finish_download_handoff(
+                                            ok, final_folder
+                                        )
+
+                                    self.after(0, org_done)
+                                except Exception as e:  # noqa: BLE001
+                                    self._ui_log(f"ERROR organizing: {e}")
+
+                                    def org_fail() -> None:
+                                        messagebox.showerror(
+                                            APP_TITLE,
+                                            f"Could not organize into Artist/Album:\n{e}",
+                                        )
+                                        self._finish_download_handoff(ok, final_folder)
+
+                                    self.after(0, org_fail)
+
+                            threading.Thread(target=org_work, daemon=True).start()
+                            return
+                        self._finish_download_handoff(ok, final_folder)
+                        return
+                    self._set_busy(False)
+
+                self.after(0, after_download)
             except Exception as e:  # noqa: BLE001
                 self._ui_log(f"ERROR: {e}")
 
@@ -1089,6 +1224,21 @@ You’re set — enjoy the music.
                 self.after(0, fail_ui)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _finish_download_handoff(self, ok: int, final_folder: Path) -> None:
+        self._ui_progress("overall", 1.0, f"Ready — {ok} track(s) in {final_folder.name}")
+        self._set_busy(False)
+        if ok <= 0:
+            return
+        if messagebox.askyesno(
+            APP_TITLE,
+            f"Downloaded {ok} MP3(s) with lyrics where matched.\n\n"
+            f"Folder:\n{final_folder}\n\n"
+            "Send this folder to the Convert tab?",
+        ):
+            self.dl_out.set(str(final_folder))
+            self._ui_progress("overall", 1.0, "Handed off → Convert tab")
+            self._handoff_to_convert()
 
     def _start_convert(self) -> None:
         if self._busy:
@@ -1113,6 +1263,7 @@ You’re set — enjoy the music.
         self._set_busy(True)
         self._append_log("--- Convert ---")
         self._last_out = Path(out)
+        self._ui_progress("convert", 0.0, "Starting convert…")
 
         def work() -> None:
             try:
@@ -1127,6 +1278,7 @@ You’re set — enjoy the music.
                     title_first=self.conv_title_first.get(),
                     use_tags=self.conv_tags.get(),
                     log=self._ui_log,
+                    progress=self._ui_progress,
                     should_cancel=lambda: self._cancel,
                 )
             except Exception as e:  # noqa: BLE001
@@ -1161,6 +1313,7 @@ You’re set — enjoy the music.
         self._set_busy(True)
         self._append_log("--- Fetch lyrics ---")
         self._last_out = Path(pack)
+        self._ui_progress("lyrics_batch", 0.0, "Starting lyrics fetch…")
 
         def work() -> None:
             try:
@@ -1170,6 +1323,7 @@ You’re set — enjoy the music.
                     delay=delay,
                     dry_run=self.lyr_dry.get(),
                     log=self._ui_log,
+                    progress=self._ui_progress,
                     should_cancel=lambda: self._cancel,
                 )
             except Exception as e:  # noqa: BLE001

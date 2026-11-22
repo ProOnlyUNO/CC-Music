@@ -34,6 +34,7 @@ ARTIST_SPLIT_RE = re.compile(r"\s*(?:,|;|&|\bfeat\.?|\bft\.?|\bfeaturing\b|\bx\b
 ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 LogFn = Callable[[str], None]
+ProgressFn = Callable[[str, float | None, str], None]
 
 
 def _is_junk_group(text: str) -> bool:
@@ -292,6 +293,7 @@ def run_convert(
     keep_unicode: bool = False,
     jobs: int | None = None,
     log: LogFn | None = None,
+    progress: ProgressFn | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     """Run conversion. Returns summary dict. log() receives progress lines."""
@@ -299,6 +301,10 @@ def run_convert(
     def _log(msg: str) -> None:
         if log:
             log(msg)
+
+    def _prog(frac: float | None, detail: str) -> None:
+        if progress:
+            progress("convert", frac, detail)
 
     input_paths = [Path(p) for p in inputs]
     files = collect_inputs(input_paths)
@@ -351,6 +357,8 @@ def run_convert(
 
     workers = jobs if jobs is not None else max(1, (os.cpu_count() or 2) // 2)
     done = failed = total_bytes = 0
+    total_todo = max(1, len(todo))
+    _prog(0.0, f"Converting 0/{len(todo)}…")
 
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
         futures = {pool.submit(convert_one, exe, it["src"], it["dst"]): it for it in todo}
@@ -377,10 +385,19 @@ def run_convert(
                     except OSError as e:
                         _log(f"  warn: could not copy lyrics: {e}")
                 _log(f"  ok  {it['shown']}  ({info / 1048576:.2f} MB)")
+                _prog(
+                    (done + failed) / total_todo,
+                    f"Convert {done + failed}/{len(todo)} — {it['shown']}",
+                )
             else:
                 failed += 1
                 _log(f"  FAILED  {it['src'].name}: {info}")
+                _prog(
+                    (done + failed) / total_todo,
+                    f"Convert failed {done + failed}/{len(todo)} — {it['src'].name}",
+                )
 
+    _prog(1.0, f"Converted {done}, skipped {skipped}, failed {failed}")
     _log(
         f"Converted {done}, skipped {skipped}, failed {failed}. "
         f"Output: {out_root.resolve()}  ({total_bytes / 1048576:.1f} MB)"

@@ -36,6 +36,7 @@ ARTIST_ALIASES: dict[str, list[str]] = {
 }
 
 LogFn = Callable[[str], None]
+ProgressFn = Callable[[str, float | None, str], None]
 
 
 @dataclass
@@ -327,11 +328,16 @@ def run_fetch(
     delay: float = DEFAULT_DELAY,
     dry_run: bool = False,
     log: LogFn | None = None,
+    progress: ProgressFn | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict:
     def _log(msg: str) -> None:
         if log:
             log(msg)
+
+    def _prog(frac: float | None, detail: str) -> None:
+        if progress:
+            progress("lyrics_batch", frac, detail)
 
     root_paths = [Path(r) for r in roots]
     root_paths = [r for r in root_paths if r.is_dir()]
@@ -351,6 +357,8 @@ def run_fetch(
     lyrics_pack = pack_root / "lyrics"
     stats = Stats(scanned=len(tracks))
     delay = max(0.2, float(delay))
+    total = max(1, len(tracks))
+    _prog(0.0, f"Lyrics 0/{len(tracks)}…")
 
     for i, t in enumerate(tracks, 1):
         if should_cancel and should_cancel():
@@ -359,6 +367,7 @@ def run_fetch(
 
         beside = t.path.with_suffix(".lrc")
         pack_path = lyrics_pack / t.rel_pack
+        _prog(i / total, f"Lyrics {i}/{len(tracks)} — {t.artist} / {t.title}")
 
         if beside.is_file() and beside.stat().st_size > 0:
             stats.skipped_existing += 1
@@ -421,6 +430,10 @@ def run_fetch(
             "\n".join(stats.misses) + ("\n" if stats.misses else ""), encoding="utf-8"
         )
 
+    _prog(
+        1.0,
+        f"Lyrics done — matched {stats.matched}, missed {stats.missed}, skipped {stats.skipped_existing}",
+    )
     _log("")
     _log("=== Summary ===")
     _log(f"Scanned       : {stats.scanned}")
