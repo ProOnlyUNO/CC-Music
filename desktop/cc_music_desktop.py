@@ -53,28 +53,33 @@ DEFAULT_CONVERT_OUT = APP_DIR / "dfpwm_out"
 DEFAULT_LYRICS_PACK = APP_DIR / "lyrics_pack"
 YTMP3_ALT_URL = "https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz"
 
-# Matrix / binary cyan — translucent glass so the background reads through
+# Windows transparent-color key: frames/labels using this punch through to the
+# Matrix underlay window so binary rain reads across the whole app.
+TRANSPARENT_KEY = "#010203"
+
+# Matrix / binary cyan — glass chrome; KEY regions are truly see-through
 COLORS = {
-    "bg_deep": "#03080c",
-    "panel": "#0a1620",
+    "bg_deep": TRANSPARENT_KEY,  # see-through on Windows
+    "panel": TRANSPARENT_KEY,
     "panel_hi": "#14384c",
-    "panel_glass": "#07141c",
+    "panel_glass": TRANSPARENT_KEY,
     "border": "#3a8a96",
     "border_soft": "#1e4a58",
     "text": "#f2fffb",
-    "text_dim": "#8ecaba",
+    "text_dim": "#a8e0d0",
     "accent": "#5dffea",
     "accent_soft": "#2a9a88",
-    "entry_bg": "#051018",
+    # Readable scrims only on interactive fields (not full slabs)
+    "entry_bg": "#071820",
     "entry_fg": "#f0fffa",
-    "log_bg": "#030e14",
-    "log_fg": "#b8f5dc",
+    "log_bg": TRANSPARENT_KEY,  # Matrix shows through the log too
+    "log_fg": "#d2ffe8",
     "scrim": (2, 10, 14),
-    # Soft glass overlays — keep alpha low so Matrix binary shows through
-    "glass_fill": (6, 22, 32, 72),
-    "glass_edge": (90, 235, 215, 95),
-    "glass_well": (5, 18, 28, 58),
-    "glass_log": (3, 14, 22, 88),
+    # Underlay frosted plates — light so rain stays obvious
+    "glass_fill": (6, 24, 36, 48),
+    "glass_edge": (90, 235, 215, 110),
+    "glass_well": (4, 18, 28, 36),
+    "glass_log": (3, 14, 22, 42),
 }
 
 
@@ -122,7 +127,7 @@ class App(tk.Tk):
         self.title(APP_TITLE)
         self.minsize(720, 560)
         self.geometry("820x640")
-        self.configure(bg=COLORS["bg_deep"])
+        self.configure(bg=TRANSPARENT_KEY)
         apply_window_icon(self)
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
@@ -131,16 +136,101 @@ class App(tk.Tk):
         self._bg_src = None
         self._bg_photo = None
         self._bg_size: tuple[int, int] | None = None
+        self._underlay: tk.Toplevel | None = None
+        self._glass_ok = False
         self._playlist_entries: list[download_core.PlaylistEntry] = []
         self._track_vars: list[tk.BooleanVar] = []
         self._playlist_title: str = ""
 
         self._load_background_source()
+        self._enable_glass_punchthrough()
+        self._build_underlay()
         self._build()
         self.after(100, self._drain_log)
-        self.bind("<Configure>", self._on_resize)
+        self.bind("<Configure>", self._on_main_configure)
+        self.bind("<Map>", self._on_main_map)
+        self.bind("<Unmap>", self._on_main_unmap)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         # Quiet background update check — never blocks first paint.
         self.after(800, self._start_update_check)
+
+    def _enable_glass_punchthrough(self) -> None:
+        """Make TRANSPARENT_KEY pixels see through to the Matrix underlay (Windows)."""
+        if sys.platform != "win32":
+            self._glass_ok = False
+            return
+        try:
+            self.wm_attributes("-transparentcolor", TRANSPARENT_KEY)
+            self._glass_ok = True
+        except tk.TclError:
+            self._glass_ok = False
+
+    def _build_underlay(self) -> None:
+        """Borderless Matrix window kept directly under the main client area."""
+        u = tk.Toplevel(self)
+        u.withdraw()
+        u.overrideredirect(True)
+        u.configure(bg="#000000")
+        try:
+            u.wm_attributes("-toolwindow", True)
+        except tk.TclError:
+            pass
+        self._bg_canvas = tk.Canvas(u, highlightthickness=0, bd=0, bg="#000000")
+        self._bg_canvas.pack(fill="both", expand=True)
+        self._underlay = u
+
+    def _sync_underlay(self) -> None:
+        if self._underlay is None:
+            return
+        try:
+            if not self.winfo_viewable() or self.state() == "iconic":
+                self._underlay.withdraw()
+                return
+        except tk.TclError:
+            return
+        self.update_idletasks()
+        x = int(self.winfo_rootx())
+        y = int(self.winfo_rooty())
+        w = max(1, int(self.winfo_width()))
+        h = max(1, int(self.winfo_height()))
+        self._underlay.geometry(f"{w}x{h}+{x}+{y}")
+        try:
+            self._underlay.deiconify()
+            self._underlay.lower(self)
+        except tk.TclError:
+            pass
+        if self._bg_size != (w, h):
+            self._bg_size = (w, h)
+            photo = self._compose_background(w, h)
+            if photo is not None:
+                self._bg_photo = photo
+                self._bg_canvas.delete("bg")
+                self._bg_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
+                self._bg_canvas.tag_lower("bg")
+
+    def _on_main_configure(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        self._sync_underlay()
+
+    def _on_main_map(self, _event: tk.Event | None = None) -> None:
+        self.after(20, self._sync_underlay)
+
+    def _on_main_unmap(self, _event: tk.Event | None = None) -> None:
+        if self._underlay is not None:
+            try:
+                self._underlay.withdraw()
+            except tk.TclError:
+                pass
+
+    def _on_close(self) -> None:
+        if self._underlay is not None:
+            try:
+                self._underlay.destroy()
+            except tk.TclError:
+                pass
+            self._underlay = None
+        self.destroy()
 
     def _load_background_source(self) -> None:
         path = find_asset("background.jpg", "background.png")
@@ -159,28 +249,27 @@ class App(tk.Tk):
         from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageTk
 
         img = self._bg_src.resize((width, height), Image.Resampling.LANCZOS)
-        # Brighten Matrix rain so it survives soft glass overlays
-        img = ImageEnhance.Brightness(img).enhance(1.05)
-        img = ImageEnhance.Contrast(img).enhance(1.12)
-        img = ImageEnhance.Color(img).enhance(1.08)
+        # Bright Matrix rain — this is what shows through transparent chrome
+        img = ImageEnhance.Brightness(img).enhance(1.18)
+        img = ImageEnhance.Contrast(img).enhance(1.2)
+        img = ImageEnhance.Color(img).enhance(1.15)
         base = img.convert("RGBA")
         overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         scrim = COLORS["scrim"]
-        # Very light vignette only — do not bury the Matrix under solid dark
-        top_h = max(60, int(height * 0.22))
+        # Soft vignette only — keep rain visible in the content well
+        top_h = max(40, int(height * 0.14))
         for y in range(top_h):
             t = y / max(1, top_h - 1)
-            alpha = int(70 * (1.0 - t * 0.85))
+            alpha = int(45 * (1.0 - t * 0.9))
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
-        bot0 = int(height * 0.78)
+        bot0 = int(height * 0.82)
         for y in range(bot0, height):
             t = (y - bot0) / max(1, height - bot0)
-            alpha = int(20 + 55 * t)
+            alpha = int(10 + 40 * t)
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
 
-        # Frosted glass shell — translucent + soft blur so binary shows through
-        glass = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        # Light frosted plates on the underlay (seen through punch-through chrome)
         mx, my = int(width * 0.028), int(height * 0.028)
         mw, mh = int(width * 0.944), int(height * 0.944)
         plate = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -192,27 +281,24 @@ class App(tk.Tk):
             outline=COLORS["glass_edge"],
             width=2,
         )
-        # Inner tab well — clearer glass, Matrix still readable
         tab_top = my + int(height * 0.088)
         tab_bot = my + int(height * 0.60)
         pdraw.rounded_rectangle(
             [mx + 12, tab_top, mx + mw - 12, tab_bot],
             radius=14,
             fill=COLORS["glass_well"],
-            outline=(100, 240, 220, 70),
+            outline=(100, 240, 220, 80),
             width=1,
         )
-        # Log strip — slightly denser for readability, still translucent
         log_top = my + int(height * 0.645)
         pdraw.rounded_rectangle(
             [mx + 12, log_top, mx + mw - 12, my + mh - 12],
             radius=14,
             fill=COLORS["glass_log"],
-            outline=(90, 230, 210, 55),
+            outline=(90, 230, 210, 65),
             width=1,
         )
-        # Soft blur for frosted glass, then a sharp edge pass for polish
-        blurred = plate.filter(ImageFilter.GaussianBlur(radius=2.4))
+        blurred = plate.filter(ImageFilter.GaussianBlur(radius=1.8))
         edge = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         edraw = ImageDraw.Draw(edge)
         edraw.rounded_rectangle(
@@ -221,26 +307,9 @@ class App(tk.Tk):
             outline=COLORS["glass_edge"],
             width=2,
         )
-        glass = Image.alpha_composite(glass, blurred)
-        glass = Image.alpha_composite(glass, edge)
+        glass = Image.alpha_composite(blurred, edge)
         composed = Image.alpha_composite(Image.alpha_composite(base, overlay), glass).convert("RGB")
         return ImageTk.PhotoImage(composed)
-
-    def _on_resize(self, event: tk.Event) -> None:
-        if event.widget is not self:
-            return
-        w, h = max(1, event.width), max(1, event.height)
-        if self._bg_size == (w, h):
-            return
-        self._bg_size = (w, h)
-        photo = self._compose_background(w, h)
-        if photo is None:
-            return
-        self._bg_photo = photo
-        if hasattr(self, "_bg_canvas"):
-            self._bg_canvas.delete("bg")
-            self._bg_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
-            self._bg_canvas.tag_lower("bg")
 
     # ------------------------------------------------------------------ UI
     def _apply_style(self) -> None:
@@ -250,10 +319,8 @@ class App(tk.Tk):
         except tk.TclError:
             pass
 
-        # Near-deep backgrounds so canvas glass + Matrix read through the chrome
-        deep = COLORS["bg_deep"]
-        glass = COLORS["panel_glass"]
-        bg = COLORS["panel"]
+        # KEY backgrounds punch through to the Matrix underlay (Windows)
+        key = TRANSPARENT_KEY
         bg2 = COLORS["panel_hi"]
         fg = COLORS["text"]
         dim = COLORS["text_dim"]
@@ -261,26 +328,26 @@ class App(tk.Tk):
         entry_bg = COLORS["entry_bg"]
         border = COLORS["border"]
 
-        style.configure(".", background=glass, foreground=fg, fieldbackground=entry_bg, bordercolor=border)
-        style.configure("TFrame", background=glass)
-        # Empty layouts = no opaque flat fill; Matrix/glass on the canvas shows through
+        style.configure(".", background=key, foreground=fg, fieldbackground=entry_bg, bordercolor=border)
+        style.configure("TFrame", background=key)
+        # Empty layouts = no opaque flat fill over the Matrix underlay
         style.layout("Glass.TFrame", [])
         style.layout("Card.TFrame", [])
         style.layout("Header.TFrame", [])
-        style.configure("Glass.TFrame", background=deep)
-        style.configure("Card.TFrame", background=glass)
-        style.configure("Header.TFrame", background=deep)
-        style.configure("TLabel", background=deep, foreground=fg)
+        style.configure("Glass.TFrame", background=key)
+        style.configure("Card.TFrame", background=key)
+        style.configure("Header.TFrame", background=key)
+        style.configure("TLabel", background=key, foreground=fg)
         style.configure(
             "Header.TLabel",
-            background=deep,
+            background=key,
             foreground=accent,
             font=("Segoe UI Semibold", 18),
         )
-        style.configure("Subhead.TLabel", background=deep, foreground=dim, font=("Segoe UI", 9))
-        style.configure("Dim.TLabel", background=deep, foreground=dim)
-        style.configure("Glass.TLabel", background=deep, foreground=fg)
-        style.configure("Section.TLabel", background=deep, foreground=accent, font=("Segoe UI Semibold", 10))
+        style.configure("Subhead.TLabel", background=key, foreground=dim, font=("Segoe UI", 9))
+        style.configure("Dim.TLabel", background=key, foreground=dim)
+        style.configure("Glass.TLabel", background=key, foreground=fg)
+        style.configure("Section.TLabel", background=key, foreground=accent, font=("Segoe UI Semibold", 10))
 
         style.configure(
             "TButton",
@@ -309,10 +376,36 @@ class App(tk.Tk):
             background=[("active", "#1f8498"), ("disabled", "#0a1822")],
             foreground=[("disabled", "#557788")],
         )
-        style.configure("TCheckbutton", background=deep, foreground=fg, font=("Segoe UI", 9))
+        style.configure(
+            "Tab.TButton",
+            background="#0c3848",
+            foreground=dim,
+            bordercolor=border,
+            padding=(14, 7),
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Tab.TButton",
+            background=[("active", "#1a6070")],
+            foreground=[("active", fg)],
+        )
+        style.configure(
+            "TabSelected.TButton",
+            background="#176878",
+            foreground=accent,
+            bordercolor=accent,
+            padding=(14, 7),
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "TabSelected.TButton",
+            background=[("active", "#1f8498")],
+            foreground=[("active", accent)],
+        )
+        style.configure("TCheckbutton", background=key, foreground=fg, font=("Segoe UI", 9))
         style.map(
             "TCheckbutton",
-            background=[("active", deep), ("selected", deep)],
+            background=[("active", key), ("selected", key)],
             foreground=[("active", accent), ("selected", accent)],
         )
         style.configure(
@@ -323,36 +416,33 @@ class App(tk.Tk):
             bordercolor=COLORS["border_soft"],
             padding=4,
         )
-        style.configure("TLabelframe", background=deep, foreground=accent, bordercolor=border)
-        style.configure("TLabelframe.Label", background=deep, foreground=accent, font=("Segoe UI Semibold", 9))
-        style.configure("TNotebook", background=deep, borderwidth=0, tabmargins=(8, 6, 8, 0))
-        # Glass tabs — translucent cyan wash, selected tab with accent weight
+        # Labelframe: transparent fill, accent label text
+        style.configure("TLabelframe", background=key, foreground=accent, bordercolor=border)
+        style.configure("TLabelframe.Label", background=key, foreground=accent, font=("Segoe UI Semibold", 9))
+        style.configure("TNotebook", background=key, borderwidth=0, tabmargins=(8, 6, 8, 0))
         style.configure(
             "TNotebook.Tab",
-            background="#0a2834",
+            background="#0c3848",
             foreground=dim,
             padding=(16, 8),
             borderwidth=0,
             lightcolor=border,
-            darkcolor=deep,
+            darkcolor=key,
             font=("Segoe UI", 9),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", "#155868"), ("active", "#1a6070")],
+            background=[("selected", "#176878"), ("active", "#1a6070")],
             foreground=[("selected", accent), ("active", fg)],
         )
 
-        style.configure("Horizontal.TScrollbar", background=bg2, troughcolor=deep, bordercolor=border)
-        style.configure("Vertical.TScrollbar", background=bg2, troughcolor=deep, bordercolor=border)
+        style.configure("Horizontal.TScrollbar", background=bg2, troughcolor=key, bordercolor=border)
+        style.configure("Vertical.TScrollbar", background=bg2, troughcolor=key, bordercolor=border)
 
     def _build(self) -> None:
         self._apply_style()
 
-        self._bg_canvas = tk.Canvas(self, highlightthickness=0, bd=0, bg=COLORS["bg_deep"])
-        self._bg_canvas.place(x=0, y=0, relwidth=1, relheight=1)
-
-        # Glass shell — deep bg so frosted Matrix on the canvas reads through
+        # No in-window canvas — Matrix lives on the underlay; chrome punches through.
         shell = ttk.Frame(self, style="Glass.TFrame", padding=0)
         shell.place(relx=0.03, rely=0.03, relwidth=0.94, relheight=0.94)
 
@@ -368,26 +458,48 @@ class App(tk.Tk):
             style="Subhead.TLabel",
         ).pack(anchor="w", pady=(2, 0))
 
-        nb = ttk.Notebook(shell)
-        nb.pack(fill="both", expand=True, padx=14, pady=(6, 0))
-        self._notebook = nb
+        # Custom tabs (not ttk.Notebook) — Notebook paints an opaque client that
+        # hides the Matrix underlay even with transparentcolor.
+        tab_bar = ttk.Frame(shell, style="Glass.TFrame", padding=(14, 4, 14, 0))
+        tab_bar.pack(fill="x")
+        self._tab_buttons: dict[str, ttk.Button] = {}
+        self._tab_frames: dict[str, ttk.Frame] = {}
+        self._active_tab = "download"
+        body = ttk.Frame(shell, style="Card.TFrame", padding=(14, 6, 14, 0))
+        body.pack(fill="both", expand=True)
+        self._tab_body = body
 
-        self.tab_download = ttk.Frame(nb, padding=10, style="Card.TFrame")
-        self.tab_convert = ttk.Frame(nb, padding=10, style="Card.TFrame")
-        self.tab_lyrics = ttk.Frame(nb, padding=10, style="Card.TFrame")
-        self.tab_help = ttk.Frame(nb, padding=10, style="Card.TFrame")
-        self.tab_commands = ttk.Frame(nb, padding=10, style="Card.TFrame")
-        nb.add(self.tab_download, text="  Download  ")
-        nb.add(self.tab_convert, text="  Convert  ")
-        nb.add(self.tab_lyrics, text="  Fetch lyrics  ")
-        nb.add(self.tab_help, text="  How to use  ")
-        nb.add(self.tab_commands, text="  Commands  ")
+        tab_specs = [
+            ("download", "  Download  "),
+            ("convert", "  Convert  "),
+            ("lyrics", "  Fetch lyrics  "),
+            ("help", "  How to use  "),
+            ("commands", "  Commands  "),
+        ]
+        for key, label in tab_specs:
+            btn = ttk.Button(
+                tab_bar,
+                text=label,
+                style="Tab.TButton",
+                command=lambda k=key: self._show_tab(k),
+            )
+            btn.pack(side="left", padx=(0, 4))
+            self._tab_buttons[key] = btn
+            frame = ttk.Frame(body, padding=10, style="Card.TFrame")
+            self._tab_frames[key] = frame
+
+        self.tab_download = self._tab_frames["download"]
+        self.tab_convert = self._tab_frames["convert"]
+        self.tab_lyrics = self._tab_frames["lyrics"]
+        self.tab_help = self._tab_frames["help"]
+        self.tab_commands = self._tab_frames["commands"]
 
         self._build_download(self.tab_download)
         self._build_convert(self.tab_convert)
         self._build_lyrics(self.tab_lyrics)
         self._build_help(self.tab_help)
         self._build_commands(self.tab_commands)
+        self._show_tab("download")
 
         bottom = ttk.Frame(shell, style="Glass.TFrame", padding=(14, 8, 14, 12))
         bottom.pack(fill="both", expand=False)
@@ -408,13 +520,15 @@ class App(tk.Tk):
             wrap="word",
             font=("Consolas", 9),
             state="disabled",
-            background=COLORS["log_bg"],
+            background=TRANSPARENT_KEY,
             foreground=COLORS["log_fg"],
             insertbackground=COLORS["log_fg"],
             relief="flat",
             highlightthickness=1,
             highlightbackground=COLORS["border"],
             highlightcolor=COLORS["accent"],
+            selectbackground="#176878",
+            selectforeground=COLORS["text"],
         )
         scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
@@ -424,22 +538,20 @@ class App(tk.Tk):
         self.status = ttk.Label(bottom, text="Ready", anchor="w", style="Dim.TLabel")
         self.status.pack(fill="x", pady=(6, 0))
 
-        # Kick an initial paint once geometry is known
-        self.after(50, self._refresh_background)
+        # Kick underlay sync once geometry is known
+        self.after(50, self._sync_underlay)
 
-    def _refresh_background(self) -> None:
-        self.update_idletasks()
-        w, h = max(1, self.winfo_width()), max(1, self.winfo_height())
-        if self._bg_size == (w, h):
+    def _show_tab(self, key: str) -> None:
+        if key not in self._tab_frames:
             return
-        self._bg_size = (w, h)
-        photo = self._compose_background(w, h)
-        if photo is None or not hasattr(self, "_bg_canvas"):
-            return
-        self._bg_photo = photo
-        self._bg_canvas.delete("bg")
-        self._bg_canvas.create_image(0, 0, anchor="nw", image=photo, tags="bg")
-        self._bg_canvas.tag_lower("bg")
+        for name, frame in self._tab_frames.items():
+            if name == key:
+                frame.pack(fill="both", expand=True)
+            else:
+                frame.pack_forget()
+        for name, btn in self._tab_buttons.items():
+            btn.configure(style="TabSelected.TButton" if name == key else "Tab.TButton")
+        self._active_tab = key
 
     def _build_download(self, parent: ttk.Frame) -> None:
         self.dl_url = tk.StringVar()
@@ -467,7 +579,7 @@ class App(tk.Tk):
             canvas_row,
             highlightthickness=1,
             highlightbackground=COLORS["border"],
-            bg=COLORS["entry_bg"],
+            bg=TRANSPARENT_KEY,
             height=180,
         )
         dl_scroll = ttk.Scrollbar(canvas_row, orient="vertical", command=self._dl_canvas.yview)
@@ -557,7 +669,7 @@ class App(tk.Tk):
             messagebox.showerror(APP_TITLE, f"Folder not found:\n{folder}")
             return
         self.conv_input.set(str(path.resolve()))
-        self._notebook.select(self.tab_convert)
+        self._show_tab("convert")
         self.status.configure(text="Convert input set from Download folder.")
         self._append_log(f"Hand-off → Convert input: {path.resolve()}")
 
@@ -651,13 +763,15 @@ class App(tk.Tk):
             font=("Segoe UI", 10),
             height=18,
             borderwidth=0,
-            background=COLORS["entry_bg"],
+            background=TRANSPARENT_KEY,
             foreground=COLORS["text"],
             insertbackground=COLORS["text"],
             relief="flat",
             highlightthickness=0,
             padx=6,
             pady=4,
+            selectbackground="#176878",
+            selectforeground=COLORS["text"],
         )
         scroll = ttk.Scrollbar(wrap, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
@@ -1087,7 +1201,8 @@ You’re set — enjoy the music.
         dlg = tk.Toplevel(self)
         dlg.title(APP_TITLE)
         dlg.transient(self)
-        dlg.configure(bg=COLORS["panel"])
+        # Solid dialog chrome (not transparent key) so the prompt stays readable
+        dlg.configure(bg="#0a1620")
         dlg.resizable(False, False)
         apply_window_icon(dlg)
         frame = ttk.Frame(dlg, padding=16)
