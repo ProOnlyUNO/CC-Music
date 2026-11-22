@@ -79,16 +79,17 @@ Also accepts **`.lrc`** drops: matches to a library `.dfpwm` (basename / normali
 `sort-music.lua` is the single in-game sorter (bulk tidy / orphan lyrics / dupe cleanup):
 
 - Music: `Artist - Album` → `Artist/Album`; loose tracks → `Singles/`; **`Singles - Title`** → `Various/Singles` + song Title (not artist=Singles)
-- Collisions: folders/files named `Name 2` / `Name_2` / `Name (2)` merge into `Name` (they appear when a nest target already existed)
+- Collisions: folders named `Name 2` / `Name_2` / `Name (2)` merge into `Name` **only when `Name` already exists** (never renames a sole numbered album)
 - SFX: create `/sfx`, move loose root `SFX*.dfpwm` into it
 - **Root cleanup:** loose computer-root `.dfpwm` + `.lrc` → match/move onto disks; leftovers cleared so `ls` isn’t a dump. Never deletes `*.lua`, `startup`, or library dirs (`music`/`sfx`/`lyrics`/`disk*`)
 - Lyrics: match **flat `.lrc` drops** (computer/disk root — CC can’t drop folders) or an optional pack tree; place beside `.dfpwm`; mirror `/lyrics` with multi-disk spill; **dedupe** extra `.lrc`
-- Audio **dupe cleanup is ON by default** with `--apply`: scans every `diskN` / `music` / Artist/Album spot, keeps the best `.dfpwm`+`.lrc` pair (prefer Artist/Album), deletes weaker extras + empty collision folders. Dry-run only reports. Use `--safe` / `--no-dedupe` to skip audio deletes.
+- Audio **dupe cleanup is OFF by default**. `--apply` alone never deletes `.dfpwm`. Pass `--dedupe` to remove **confirmed** extras only (same-size copy kept; prefer `.dfpwm`+`.lrc`; never delete a sole library copy or a protected Artist/Album track without a same-album twin). Dry-run with `--dedupe` reports would-deletes. `--safe` / `--no-dedupe` keep deletes off.
 
 ```text
-sort-music                  -- preview (no writes; reports moves + merges + deletes)
-sort-music --apply          -- nest + Singles + root + SFX + lyrics + dupe cleanup
-sort-music --apply --safe   -- tidy without deleting audio dupes
+sort-music                  -- preview (no writes; reports moves + merges)
+sort-music --apply          -- nest + Singles + root + SFX + lyrics (albums survive)
+sort-music --apply --dedupe -- also delete confirmed audio extras
+sort-music --dedupe         -- dry-run that shows would-delete audio extras
 ```
 
 Drop `.lrc` files onto the computer or a disk root, then `--apply`. Details: `fetch-lyrics.md`.
@@ -191,7 +192,7 @@ Flow: pick **artist** → **album** → a **song**, or the top **DELETE ALBUM** 
 
 1. **Visualizer marquee** — copy Project `docs/visualizer.lua` onto **both** side PCs (replace). Restart each side PC (startup preferred). Play a long title; top line should scroll with a short pause at start/end. Toggle LYRICS — header still scrolls if it doesn’t fit. Spectrum/waveform unchanged when lyrics is off.
 2. **Importer `.lrc`** — copy Project `docs/Importer.lua` onto the main computer as `Importer.lua` (or `uploader.lua`). Run it, pick artist/album, drop `.dfpwm` and/or `.lrc` on the computer screen. Matched lyrics land beside the song; misses print clearly. Same-drop song+lyric pairs work.
-3. **Bulk orphans only** — if many `.lrc` are already on the computer/disks: `sort-music --apply --lyrics-only` (lyrics only; no audio deletes). For full tidy + dupe cleanup: `sort-music --apply`. Preview first with bare `sort-music`. Use `--safe` if you want tidy without deleting audio dupes.
+3. **Bulk orphans only** — if many `.lrc` are already on the computer/disks: `sort-music --apply --lyrics-only` (lyrics only; no audio deletes). For full tidy: `sort-music --apply` (albums safe). Add `--dedupe` only if you want confirmed audio extras removed. Preview first with bare `sort-music` (or `sort-music --dedupe` to preview deletes).
 4. Restart jukebox after placing lyrics if you want `(L)` markers without waiting for F5 rescan quirks.
 
 ## Pocket Advanced Computer
