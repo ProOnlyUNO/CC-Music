@@ -55,11 +55,11 @@ sort-music --apply --lyrics-only   -- place every matched .lrc beside its .dfpwm
 lyrics-status                      -- optional: count with/missing .lrc after sort
 ```
 
-Full tidy (nest + SFX + lyrics, still no audio delete):
+Full tidy (nest + SFX + lyrics + audio dupe cleanup):
 
 ```text
-sort-music --apply
-sort-music --apply --dedupe   -- also remove duplicate .dfpwm (opt-in only)
+sort-music --apply              -- includes dupe cleanup (keeps best .dfpwm+.lrc)
+sort-music --apply --safe       -- tidy without deleting audio dupes
 ```
 
 ### Matching (Importer and sort-music)
@@ -79,7 +79,7 @@ It **prefers copying beside** that song’s `.dfpwm` on the song’s disk, then 
 | Step | Action |
 |------|--------|
 | SFX | Creates `/sfx`, moves loose root `SFX*.dfpwm` into it |
-| Music | `Artist - Album` → `Artist/Album`; bare tracks → `Singles/`. Audio **dedupe only with `--dedupe`** |
+| Music | `Artist - Album` → `Artist/Album`; bare tracks → `Singles/`. Audio **dupe cleanup ON** (keep best `.dfpwm`+`.lrc`, prefer Artist/Album); `--safe` / `--no-dedupe` skips deletes |
 | Lyrics | Recursive `.lrc` find + match; place beside `.dfpwm`; mirror `/lyrics`; dedupe extra `.lrc`; clear consumed flat drops |
 
 Zip files: skipped unless an `unzip` program already exists on the computer (CC has no built-in unzip).

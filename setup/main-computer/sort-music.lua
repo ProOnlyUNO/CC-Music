@@ -3,8 +3,9 @@
 
   Does all of:
     1) Music:  Artist - Album → Artist/Album ; bare Artist/*.dfpwm → Artist/Singles
-               + optional --dedupe to remove duplicate .dfpwm (OFF by default)
-    2) SFX:    create /sfx ; move loose root SFX*.dfpwm into it
+               + cross-disk audio dedupe (ON with --apply; dry-run reports only)
+                 Keep best .dfpwm+.lrc pair; prefer Artist/Album path; delete extras
+    2) SFX:    create /sfx ; move loose root SFX*.dfpwm into it (not audio-deduped)
     3) Lyrics: match .lrc to library tracks, place beside songs, mirror /lyrics
                (spills across disks when full). Sources:
                  • recursive: every .lrc under computer + disk + diskN
@@ -14,10 +15,10 @@
                + remove duplicate .lrc for the same .dfpwm
 
   Usage:
-      sort-music                  -- dry-run preview (safe default; no writes)
-      sort-music --apply          -- nest + Singles + SFX + lyrics (no audio delete)
-      sort-music --apply --dedupe -- also remove duplicate .dfpwm (opt-in)
-      sort-music --apply --safe   -- alias: nest/Singles/SFX/lyrics, never audio dedupe
+      sort-music                  -- dry-run preview (report only; no writes)
+      sort-music --apply          -- nest + Singles + SFX + lyrics + dupe cleanup
+      sort-music --apply --safe   -- nest/Singles/SFX/lyrics, never delete audio
+      sort-music --apply --no-dedupe  -- same as --safe for audio deletes
       sort-music --apply --lyrics-only
       sort-music --apply --no-lyrics
       sort-music --apply --no-mirror
@@ -25,8 +26,8 @@
   Drop many .lrc files onto the computer or a disk root, then:
       sort-music --apply
 
-  Flags: --apply  --dry-run  --dedupe  --safe  --lyrics-only  --no-lyrics
-         --no-music  --no-sfx  --no-mirror  --help
+  Flags: --apply  --dry-run  --dedupe  --no-dedupe  --safe  --lyrics-only
+         --no-lyrics  --no-music  --no-sfx  --no-mirror  --help
 ]]
 
 local RESERVE = 4096 -- bytes kept free per mount (Importer-style)
@@ -39,7 +40,7 @@ local opts = {
   doSfx = true,
   doLyrics = true,
   mirror = true,
-  dedupe = false, -- audio deletes are opt-in (a prior bug wiped libraries)
+  dedupe = true, -- default ON; dry-run still only reports. Use --safe / --no-dedupe to skip.
   pack = nil,
 }
 
@@ -53,7 +54,7 @@ for _, a in ipairs(rawArgs) do
     opts.apply = false
   elseif lower == "--dedupe" then
     opts.dedupe = true
-  elseif lower == "--safe" then
+  elseif lower == "--safe" or lower == "--no-dedupe" or lower == "--nodedupe" then
     opts.dedupe = false
   elseif lower == "--lyrics-only" then
     opts.doLyrics = true
@@ -70,10 +71,11 @@ for _, a in ipairs(rawArgs) do
   elseif lower == "--help" or lower == "-h" then
     print("sort-music [--apply] [packDir] [--lyrics-only] [--no-lyrics] [--no-mirror]")
     print("  Dry-run by default (no writes). --apply writes.")
-    print("  Music nest + Singles + SFX + lyrics. Audio dedupe only with --dedupe.")
+    print("  Music nest + Singles + SFX + lyrics + audio dupe cleanup (default).")
+    print("  Dupes: keep best .dfpwm+.lrc pair; prefer Artist/Album; delete extras.")
+    print("  --safe / --no-dedupe skips audio deletes. --dedupe forces them on.")
     print("  Recursively finds .lrc; matches basename/tags/fuzzy; places beside .dfpwm.")
     print("  Drop flat .lrc on computer/disk root, then: sort-music --apply --lyrics-only")
-    print("  --safe = --apply without audio dedupe (default apply behavior).")
     return
   elseif not a:match("^%-") then
     if not opts.pack then opts.pack = a end
@@ -300,37 +302,6 @@ local function musicContainers()
   return out
 end
 
--- Dedupe .dfpwm in one album folder: same song key → keep largest, delete rest
-local function dedupeAlbumDir(albumPath)
-  local byKey = {}
-  local removed = 0
-  for _, file in ipairs(listDir(albumPath)) do
-    local fp = fs.combine(albumPath, file)
-    if not fs.isDir(fp) and isAudio(file) then
-      local key = songKeys(file)[1]
-      byKey[key] = byKey[key] or {}
-      byKey[key][#byKey[key] + 1] = { path = fp, size = fileSize(fp), name = file }
-    end
-  end
-  for _, group in pairs(byKey) do
-    if #group > 1 then
-      table.sort(group, function(a, b)
-        if a.size ~= b.size then return a.size > b.size end
-        return a.path < b.path
-      end)
-      for i = 2, #group do
-        -- Never delete the keeper path if it somehow appears twice in the group
-        if group[i].path ~= group[1].path then
-          print("  dedupe audio " .. group[i].path .. " (keep " .. group[1].name .. ")")
-          local ok, err = deletePath(group[i].path)
-          if ok then removed = removed + 1 else printError("  ! " .. tostring(err)) end
-        end
-      end
-    end
-  end
-  return removed
-end
-
 -- Unique library roots for walks. Prefer mount once (scanArtistTree recurses into
 -- music/) so disk + disk/music are not both scanned (that used to self-delete).
 local function uniqueLibraryRoots()
@@ -352,9 +323,57 @@ local function uniqueLibraryRoots()
   return out
 end
 
+local function isWeakArtist(name)
+  local n = norm(name)
+  return n == "" or n == "singles" or n == "various" or n == "unknown"
+end
+
+local function isWeakAlbum(name)
+  local n = norm(name)
+  return n == "" or n == "singles" or n == "unknown"
+end
+
+local function hasBesideLrc(audioPath)
+  local file = fs.getName(audioPath)
+  if not isAudio(file) then return false end
+  local base = file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local beside = fs.combine(fs.getDir(audioPath), base .. ".lrc")
+  return fs.exists(beside) and not fs.isDir(beside)
+end
+
+-- Higher = better keeper. Prefer complete .dfpwm+.lrc pairs, then Artist/Album paths.
+local function audioKeepScore(c)
+  local score = 0
+  if c.hasLrc then score = score + 10000 end
+  if not isWeakArtist(c.artist) and not isWeakAlbum(c.album) then
+    score = score + 1000 -- canonical Artist/Album
+  elseif not isWeakArtist(c.artist) then
+    score = score + 500 -- Artist/Singles
+  end
+  local dir = fs.getDir(c.path) or ""
+  if dir:find("/music/", 1, true) or dir:match("^music/") or dir == "music"
+      or dir:match("^disk%d*/music") then
+    score = score + 100
+  end
+  -- Deeper structured paths beat flat disk-root drops
+  local depth = 0
+  for _ in dir:gmatch("[^/]+") do depth = depth + 1 end
+  score = score + math.min(depth, 6) * 10
+  -- Larger file as weak tiebreaker
+  score = score + math.min(c.size or 0, 5000000) / 5000000
+  return score
+end
+
+local function betterAudio(a, b)
+  local sa, sb = audioKeepScore(a), audioKeepScore(b)
+  if sa ~= sb then return sa > sb end
+  if a.size ~= b.size then return a.size > b.size end
+  return a.path < b.path
+end
+
 local function runMusic()
   print(modeTag() .. "=== Music tidy (Artist/Album + Singles"
-    .. (opts.dedupe and " + dedupe) ===" or "; audio dedupe off) ==="))
+    .. (opts.dedupe and " + dupe cleanup) ===" or "; audio dedupe off) ==="))
   local movedFolders, movedSingles, deduped = 0, 0, 0
 
   for _, root in ipairs(musicContainers()) do
@@ -411,7 +430,7 @@ local function runMusic()
   end
 
   if not opts.dedupe then
-    print("  audio dedupe skipped (pass --dedupe to enable deletes)")
+    print("  audio dedupe skipped (--safe / --no-dedupe)")
     print(string.format(
       "  nested folders: %d  singles files: %d  audio deduped: 0",
       movedFolders, movedSingles
@@ -419,44 +438,33 @@ local function runMusic()
     return
   end
 
-  -- Cross-disk / nested dedupe: same Artist/Album/song key → keep one
-  -- Also per-folder duplicates after nesting.
-  local seen = {} -- key = artist|album|song → {path, size}
-  local seenPaths = {} -- absolute path → true (guards double-walk self-delete)
+  -- Collect every .dfpwm under library roots once (seenPaths guards self-delete).
+  -- Group same song across disks/spots; keep best pair / Artist/Album; delete rest.
+  local candidates, seenPaths = {}, {}
 
-  local function noteAudio(path, file, artistName, albumName)
-    if seenPaths[path] then return end
+  local function collectAudio(path, file, artistName, albumName)
+    if seenPaths[path] or not isAudio(file) then return end
     seenPaths[path] = true
-    local key = norm(artistName) .. "|" .. norm(albumName) .. "|" .. (songKeys(file)[1] or "")
-    local sz = fileSize(path)
-    local prev = seen[key]
-    if not prev then
-      seen[key] = { path = path, size = sz }
-      return
-    end
-    -- Same path registered under a colliding key — never delete ourselves
-    if prev.path == path then return end
-    -- duplicate: keep larger (or earlier path if equal)
-    if sz > prev.size then
-      print("  dedupe audio " .. prev.path .. " (keep " .. path .. ")")
-      local ok = deletePath(prev.path)
-      if ok then deduped = deduped + 1 end
-      seen[key] = { path = path, size = sz }
-    else
-      print("  dedupe audio " .. path .. " (keep " .. prev.path .. ")")
-      local ok = deletePath(path)
-      if ok then deduped = deduped + 1 end
-    end
+    local sk = songKeys(file)[1] or norm(file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", ""))
+    if sk == "" then return end
+    candidates[#candidates + 1] = {
+      path = path,
+      name = file,
+      artist = artistName or "Singles",
+      album = albumName or "Singles",
+      songKey = sk,
+      size = fileSize(path),
+      hasLrc = hasBesideLrc(path),
+    }
   end
 
   local function walkAlbum(dir, artistName, albumName)
     for _, file in ipairs(listDir(dir)) do
       local fp = fs.combine(dir, file)
       if not fs.isDir(fp) and isAudio(file) then
-        noteAudio(fp, file, artistName, albumName)
+        collectAudio(fp, file, artistName, albumName)
       end
     end
-    deduped = deduped + dedupeAlbumDir(dir)
   end
 
   local function scanArtistTree(root)
@@ -484,7 +492,7 @@ local function runMusic()
               if fs.isDir(albumPath) then
                 walkAlbum(albumPath, entry, albumName)
               elseif isAudio(albumName) then
-                noteAudio(albumPath, albumName, entry, "Singles")
+                collectAudio(albumPath, albumName, entry, "Singles")
               end
             end
           elseif hasDirectAudio then
@@ -492,7 +500,7 @@ local function runMusic()
           end
         end
       elseif isAudio(entry) then
-        noteAudio(entryPath, entry, "Singles", "Singles")
+        collectAudio(entryPath, entry, "Singles", "Singles")
       end
     end
   end
@@ -501,9 +509,109 @@ local function runMusic()
     scanArtistTree(root)
   end
 
+  -- Group by song key, then split by real artist (weak artists merge into a unique match).
+  local bySong = {}
+  for _, c in ipairs(candidates) do
+    local list = bySong[c.songKey]
+    if not list then list = {} bySong[c.songKey] = list end
+    list[#list + 1] = c
+  end
+
+  local function resolveGroup(group)
+    if not group or #group < 2 then return end
+    -- Unique paths only; skip already-removed files after earlier resolves
+    local uniq, seen = {}, {}
+    for _, c in ipairs(group) do
+      if not seen[c.path] then
+        seen[c.path] = true
+        if opts.dryRun or fs.exists(c.path) then
+          uniq[#uniq + 1] = c
+        end
+      end
+    end
+    if #uniq < 2 then return end
+
+    table.sort(uniq, betterAudio)
+    local keep = uniq[1]
+    local why = keep.hasLrc and "pair+lrc" or "canonical"
+    for i = 2, #uniq do
+      local loser = uniq[i]
+      if loser.path ~= keep.path then
+        print(string.format(
+          "  dedupe audio %s (keep %s [%s])",
+          loser.path, keep.path, why
+        ))
+        local ok, err = deletePath(loser.path)
+        if ok then
+          deduped = deduped + 1
+          -- Drop orphan beside-.lrc on the loser so it doesn't linger without audio
+          if loser.hasLrc then
+            local base = loser.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+            local beside = fs.combine(fs.getDir(loser.path), base .. ".lrc")
+            local keepBeside = fs.combine(
+              fs.getDir(keep.path),
+              keep.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc"
+            )
+            if beside ~= keepBeside and fs.exists(beside) and not fs.isDir(beside) then
+              print("  dedupe orphan-lrc " .. beside)
+              deletePath(beside)
+            end
+          end
+        else
+          printError("  ! " .. tostring(err))
+        end
+      end
+    end
+  end
+
+  for _, group in pairs(bySong) do
+    if #group >= 2 then
+      local byArtist, weak = {}, {}
+      for _, c in ipairs(group) do
+        if isWeakArtist(c.artist) then
+          weak[#weak + 1] = c
+        else
+          local a = norm(c.artist)
+          byArtist[a] = byArtist[a] or {}
+          byArtist[a][#byArtist[a] + 1] = c
+        end
+      end
+      local artistKeys = {}
+      for a in pairs(byArtist) do artistKeys[#artistKeys + 1] = a end
+
+      if #artistKeys == 0 then
+        -- Only weak/flat copies of the same song key
+        resolveGroup(group)
+      elseif #artistKeys == 1 then
+        -- Merge flat/Singles orphans into the one real artist
+        local a = artistKeys[1]
+        for _, c in ipairs(weak) do byArtist[a][#byArtist[a] + 1] = c end
+        resolveGroup(byArtist[a])
+      else
+        -- Multiple real artists share a title — dedupe within each artist.
+        -- Fold each flat/orphan into the strongest Artist/Album (or paired) bucket.
+        for _, w in ipairs(weak) do
+          local bestA, bestScore = nil, -1
+          for _, a in ipairs(artistKeys) do
+            for _, c in ipairs(byArtist[a]) do
+              local sc = audioKeepScore(c)
+              if sc > bestScore then bestScore, bestA = sc, a end
+            end
+          end
+          if bestA and bestScore >= 1000 then
+            byArtist[bestA][#byArtist[bestA] + 1] = w
+          end
+        end
+        for _, a in ipairs(artistKeys) do
+          resolveGroup(byArtist[a])
+        end
+      end
+    end
+  end
+
   print(string.format(
-    "  nested folders: %d  singles files: %d  audio deduped: %d",
-    movedFolders, movedSingles, deduped
+    "  nested folders: %d  singles files: %d  audio scanned: %d  audio deduped: %d",
+    movedFolders, movedSingles, #candidates, deduped
   ))
 end
 
@@ -1226,11 +1334,12 @@ end
 ------------------------------------------------------------------ main
 print(modeTag() .. "sort-music — music + sfx + lyrics")
 if opts.dryRun then
-  print("Preview only. Re-run with --apply to write.")
+  print("Preview only (reports moves + dupe cleanup). Re-run with --apply to write.")
 elseif opts.dedupe then
-  print("Audio dedupe ON (--dedupe): duplicate .dfpwm may be deleted.")
+  print("Audio dupe cleanup ON: keeps best .dfpwm+.lrc (prefer Artist/Album); deletes extras.")
+  print("Pass --safe or --no-dedupe to skip audio deletes.")
 else
-  print("Audio dedupe OFF (default). Nest/Singles/SFX/lyrics only. Add --dedupe to delete dupes.")
+  print("Audio dupe cleanup OFF (--safe / --no-dedupe). Nest/Singles/SFX/lyrics only.")
 end
 
 if opts.doSfx then runSfx() end
@@ -1241,6 +1350,7 @@ print("---")
 print(modeTag() .. "Done.")
 if opts.dryRun then
   print("Next: sort-music --apply")
+  print("  (or sort-music --apply --safe to tidy without deleting audio dupes)")
 else
   print("F5 / restart jukebox to rescan. DJ picks up /sfx on next flip.")
 end

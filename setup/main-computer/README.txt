@@ -8,7 +8,9 @@ Files
 -----
   jukebox.lua         Main jukebox UI (required)
   Importer.lua        Drag-drop .dfpwm / .lrc onto the computer screen
-  sort-music.lua      Optional — tidy library + place orphan lyrics
+  sort-music.lua      Optional — tidy library, place orphan lyrics, delete audio dupes
+                      Run: sort-music (preview) then sort-music --apply
+                      --safe skips audio deletes; keeps best .dfpwm+.lrc pair
   delete-music.lua    Optional — delete a song or whole album safely
   lyrics-status.lua   Optional — count tracks with / without lyrics
 
