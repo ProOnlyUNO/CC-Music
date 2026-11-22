@@ -24,6 +24,8 @@ from name_sanitize import sanitize_media_path, unique_filename
 
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
+# phase, fraction 0..1 (None = indeterminate / busy), detail message
+ProgressFn = Callable[[str, float | None, str], None]
 
 ILLEGAL_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
@@ -269,7 +271,11 @@ def _extract_flat_exe(exe: str, url: str) -> dict[str, Any]:
     return data
 
 
-def list_playlist(url: str, log: LogFn | None = None) -> tuple[str, list[PlaylistEntry]]:
+def list_playlist(
+    url: str,
+    log: LogFn | None = None,
+    progress: ProgressFn | None = None,
+) -> tuple[str, list[PlaylistEntry]]:
     """Fetch flat playlist metadata. Returns (playlist_title, entries)."""
     original = (url or "").strip()
     if not original:
@@ -280,6 +286,8 @@ def list_playlist(url: str, log: LogFn | None = None) -> tuple[str, list[Playlis
         raise RuntimeError(msg)
 
     fetch_url, expect_playlist = normalize_playlist_url(original)
+    if progress:
+        progress("fetch", None, "Fetching playlist titles…")
     if log:
         log(f"Fetching playlist via {msg}…")
         if expect_playlist and fetch_url != original:
@@ -323,6 +331,12 @@ def list_playlist(url: str, log: LogFn | None = None) -> tuple[str, list[Playlis
     if log:
         log(f"Playlist: {playlist_title}")
         log(f"Found {len(entries)} downloadable track(s).")
+    if progress:
+        progress(
+            "fetch",
+            1.0,
+            f"Found {len(entries)} track(s) — {playlist_title}",
+        )
 
     if not entries:
         raise RuntimeError(
@@ -399,13 +413,48 @@ def _embed_tags_ffmpeg(path: Path, meta: TrackMeta, log: LogFn | None = None) ->
             log(f"  warn: tag embed failed: {e}")
 
 
+def _yt_dlp_progress_hook(progress: ProgressFn | None, label: str):
+    """Map yt-dlp download dict → progress(phase, frac, detail)."""
+
+    def hook(d: dict) -> None:  # noqa: ANN001
+        if not progress:
+            return
+        status = d.get("status")
+        if status == "downloading":
+            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            done = d.get("downloaded_bytes") or 0
+            frac = (done / total) if total else None
+            speed = d.get("speed")
+            eta = d.get("eta")
+            bits = []
+            if frac is not None:
+                bits.append(f"{frac * 100:.0f}%")
+            if speed:
+                try:
+                    bits.append(f"{float(speed) / 1048576:.1f} MB/s")
+                except (TypeError, ValueError):
+                    pass
+            if eta is not None:
+                bits.append(f"ETA {eta}s")
+            detail = f"{label} — " + (" · ".join(bits) if bits else "downloading…")
+            progress("track", frac, detail)
+        elif status == "finished":
+            progress("track", 1.0, f"{label} — converting to MP3…")
+        elif status == "error":
+            progress("track", None, f"{label} — download error")
+
+    return hook
+
+
 def _download_one_api(
     yt_dlp,
     entry: PlaylistEntry,
     outtmpl: str,
     meta: TrackMeta,
     log: LogFn | None,
+    progress: ProgressFn | None = None,
 ) -> Path | None:
+    label = f"{meta.artist} — {meta.title}"
     opts = {
         "quiet": True,
         "no_warnings": True,
@@ -433,6 +482,7 @@ def _download_one_api(
                 f"album={meta.album}",
             ]
         },
+        "progress_hooks": [_yt_dlp_progress_hook(progress, label)],
         "logger": _logger(log),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -498,13 +548,19 @@ def organize_tracks(
     library_root: str | Path,
     *,
     log: LogFn | None = None,
+    progress: ProgressFn | None = None,
 ) -> Path:
     """Move MP3 + sibling .lrc into ``library_root/Artist/Album/Song.*``."""
     root = Path(library_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     reserved: set[str] = set()
-    for t in tracks:
+    total = max(1, len(tracks))
+    if progress:
+        progress("organize", 0.0, f"Organizing 0/{len(tracks)} into Artist/Album…")
+    for i, t in enumerate(tracks, start=1):
         if not t.path.exists():
+            if progress:
+                progress("organize", i / total, f"Organize {i}/{len(tracks)} (missing file)")
             continue
         old_path = t.path
         old_lrc = None
@@ -532,8 +588,16 @@ def organize_tracks(
             t.lrc = new_lrc
         else:
             t.lrc = new_lrc if new_lrc.exists() else None
+        if progress:
+            progress(
+                "organize",
+                i / total,
+                f"Organize {i}/{len(tracks)} — {t.meta.artist} / {t.meta.album}",
+            )
     if log:
         log(f"Organized into Artist/Album under {root}")
+    if progress:
+        progress("organize", 1.0, f"Organized {len(tracks)} track(s)")
     return root
 
 
@@ -545,6 +609,7 @@ def download_entries(
     fetch_lyrics: bool = True,
     lyrics_delay: float = lyrics_core.DEFAULT_DELAY,
     log: LogFn | None = None,
+    progress: ProgressFn | None = None,
     should_cancel: CancelFn | None = None,
 ) -> tuple[int, int, Path, list[DownloadedTrack]]:
     """Download selected playlist entries as MP3 into out_dir.
@@ -552,6 +617,9 @@ def download_entries(
     Lyrics are fetched **before** the clean rename finishes pairing, using
     playlist/artist metadata so LRCLIB still sees the real artist after any
     ``[videoId]`` strip. Returns (ok_count, fail_count, out_path, tracks).
+
+    ``progress(phase, frac, detail)`` reports overall + per-track updates.
+    Phases: ``overall``, ``track``, ``lyrics``.
     """
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -564,13 +632,21 @@ def download_entries(
     if not selected:
         raise ValueError("Select at least one track to download.")
 
+    total = len(selected)
     if log:
-        log(f"Downloading {len(selected)} track(s) as MP3 → {out}")
+        log(f"Downloading {total} track(s) as MP3 → {out}")
         log(msg)
         if fetch_lyrics:
             log("Auto-fetch lyrics (LRCLIB) using playlist artist/title before clean rename.")
         if not shutil.which("ffmpeg"):
             log("Note: ffmpeg not on PATH — MP3 extract may fail. Install: winget install ffmpeg")
+
+    def _overall(n: int, track_frac: float, detail: str) -> None:
+        if not progress:
+            return
+        # Within each track: download ~0–70%, lyrics ~70–95%, finish ~95–100%
+        overall = min(1.0, max(0.0, (n - 1 + track_frac) / total))
+        progress("overall", overall, detail)
 
     yt_dlp = _import_yt_dlp()
     exe = None if yt_dlp is not None else find_yt_dlp_exe()
@@ -583,6 +659,8 @@ def download_entries(
         if should_cancel and should_cancel():
             if log:
                 log("Cancelled.")
+            if progress:
+                progress("overall", (n - 1) / total, "Cancelled")
             break
 
         meta = entry_meta(entry, playlist_title)
@@ -590,6 +668,7 @@ def download_entries(
         entry.artist = meta.artist
         entry.album = meta.album
         entry.track_title = meta.title
+        label = f"{meta.artist} — {meta.title}"
 
         safe = _safe_filename(entry.track_title or entry.title)
         # Clean outtmpl — no [youtubeId] suffix (kept unique via index + disambiguator).
@@ -607,14 +686,28 @@ def download_entries(
         outtmpl = str(out / f"{claimed_stem}.%(ext)s")
 
         if log:
-            log(f"[{n}/{len(selected)}] {meta.artist} — {meta.title}")
+            log(f"[{n}/{total}] {label}")
+        _overall(n, 0.0, f"Track {n}/{total}: {label}")
+        if progress:
+            progress("track", 0.0, f"Starting download — {label}")
+
+        def _track_progress(phase: str, frac: float | None, detail: str, _n=n) -> None:
+            if progress:
+                progress(phase, frac, detail)
+            # Map track download frac into overall (0–0.70 of this track slot)
+            tf = 0.0 if frac is None else max(0.0, min(1.0, frac)) * 0.70
+            _overall(_n, tf, detail)
 
         try:
             produced: Path | None
             if yt_dlp is not None:
-                produced = _download_one_api(yt_dlp, entry, outtmpl, meta, log)
+                produced = _download_one_api(
+                    yt_dlp, entry, outtmpl, meta, log, progress=_track_progress
+                )
             else:
                 assert exe
+                if progress:
+                    progress("track", None, f"Downloading (yt-dlp exe) — {label}")
                 produced = _download_one_exe(exe, entry, outtmpl, meta, log)
 
             if produced is None:
@@ -626,10 +719,14 @@ def download_entries(
             if produced is not None and produced.exists():
                 # Prefer tags even if yt-dlp metadata PP was skipped.
                 _embed_tags_ffmpeg(produced, meta, log=log)
+                _overall(n, 0.72, f"Track {n}/{total}: tagging — {label}")
 
                 # Lyrics WHILE artist/title are known — write beside current file,
                 # then sanitize_media_path renames .lrc in lockstep with the audio.
                 if fetch_lyrics:
+                    if progress:
+                        progress("lyrics", None, f"Fetching lyrics — {label}")
+                    _overall(n, 0.75, f"Track {n}/{total}: lyrics — {label}")
                     _status, lrc_path = lyrics_core.fetch_beside(
                         produced,
                         artist=meta.artist,
@@ -638,6 +735,9 @@ def download_entries(
                         delay=lyrics_delay,
                         log=log,
                     )
+                    if progress:
+                        progress("lyrics", 1.0, f"Lyrics {_status} — {label}")
+                    _overall(n, 0.92, f"Track {n}/{total}: lyrics {_status} — {label}")
 
                 cleaned = sanitize_media_path(produced, reserved=reserved_names)
                 if cleaned != produced and log:
@@ -676,13 +776,25 @@ def download_entries(
             if log:
                 log(f"  OK → {produced.name if produced else '(done)'}")
             ok_count += 1
+            _overall(n, 1.0, f"Track {n}/{total} done — {label}")
+            if progress:
+                progress("track", 1.0, f"Done — {label}")
         except Exception as e:  # noqa: BLE001
             fail_count += 1
             if log:
                 log(f"  FAIL: {e}")
+            _overall(n, 1.0, f"Track {n}/{total} failed — {label}")
+            if progress:
+                progress("track", 1.0, f"Failed — {label}")
 
     if log:
         log(f"Done. Saved {ok_count}, failed {fail_count}. Folder: {out}")
+    if progress:
+        progress(
+            "overall",
+            1.0,
+            f"Download complete — saved {ok_count}, failed {fail_count}",
+        )
 
     return ok_count, fail_count, out, downloaded
 
