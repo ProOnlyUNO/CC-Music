@@ -4,7 +4,7 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 
 **Developer: ProOnlyUNO** · v1.0.0
 
-1. **Download** — YouTube playlist/album → MP3 (yt-dlp) → auto LRCLIB lyrics → optional **Artist/Album** folders
+1. **Download** — YouTube playlist/album **or Genius album** → MP3 (yt-dlp) → auto LRCLIB lyrics → optional **Artist/Album** folders
 2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc`)
 3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
 4. **How to use** / **Commands** — friendly in-app guides
@@ -26,17 +26,19 @@ On launch the app quietly checks GitHub Release **v1.0.0** for a newer **build s
 
 Dev shortcut: double-click **`dist\CC_Music_Tools.exe`**.
 
-## Download tab (YouTube → MP3)
+## Download tab (YouTube / Genius → MP3)
 
 1. Open **Download**.
-2. Paste a YouTube **playlist** or **album** URL.
-3. Click **Fetch titles** — checklist of tracks appears.
+2. **YouTube:** search songs/playlists, or paste a playlist/song URL.
+   **Genius:** switch to **Genius album**, search by name, or paste `https://genius.com/albums/...`.
+3. Click **Fetch titles** — checklist of tracks appears (`[→ YT]` means YouTube match on download).
 4. Select the songs you want (Select all / Select none).
 5. Pick an MP3 download folder → **Download selected MP3s**.
-6. Lyrics are fetched automatically (artist/title kept in tags) before clean rename.
-7. When prompted, pick a library root → files land as `Artist/Album/Song.mp3` (+ `.lrc`).
-8. Click **Send folder → Convert** (offered after a successful download).
-9. On **Convert**, turn those MP3s into `Artist/Album/Song.dfpwm`.
+6. Genius tracks are matched on YouTube (`Artist Title`, prefer Topic / official) then downloaded.
+7. Lyrics are fetched automatically (artist/title kept in tags) before clean rename.
+8. When prompted, pick a library root → files land as `Artist/Album/Song.mp3` (+ `.lrc`).
+9. Click **Send folder → Convert** (offered after a successful download).
+10. On **Convert**, turn those MP3s into `Artist/Album/Song.dfpwm`.
 
 Uses **yt-dlp** in-app (more reliable than browser scrapers). Keep yt-dlp updated.
 
@@ -73,7 +75,7 @@ Start with **`setup/START_HERE.txt`**.
 
 | Tab | Purpose |
 |-----|---------|
-| **Download** | YouTube playlist/album → checklist → MP3 (yt-dlp) |
+| **Download** | YouTube or Genius album → checklist → MP3 (yt-dlp) |
 | **Convert** | Folder or audio files → `.dfpwm` |
 | **Fetch lyrics** | `.dfpwm` library → `.lrc` + pack |
 | **How to use** | Full friendly guide (points at `setup/`) |
