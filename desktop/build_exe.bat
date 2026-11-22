@@ -47,6 +47,13 @@ if not exist assets\background.jpg if not exist assets\background.png (
 echo Stopping running CC_Music_Tools if needed...
 taskkill /F /IM CC_Music_Tools.exe >nul 2>&1
 
+echo Stamping BUILD_STAMP + build-info.json...
+python stamp_build.py
+if errorlevel 1 (
+  echo ERROR: stamp_build.py failed.
+  exit /b 1
+)
+
 echo Cleaning previous build junk...
 if exist build rmdir /s /q build
 if exist dist\CC_Music_Tools.exe del /f /q dist\CC_Music_Tools.exe
@@ -70,11 +77,13 @@ python -m PyInstaller ^
   --name CC_Music_Tools ^
   --icon "assets\app-icon.ico" ^
   --add-data "assets;assets" ^
+  --hidden-import build_info ^
   --hidden-import convert_core ^
   --hidden-import download_core ^
   --hidden-import lyrics_core ^
   --hidden-import meta_parse ^
   --hidden-import name_sanitize ^
+  --hidden-import update_check ^
   --hidden-import yt_dlp ^
   --collect-submodules yt_dlp ^
   --hidden-import PIL ^
