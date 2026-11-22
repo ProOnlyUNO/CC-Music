@@ -11,7 +11,7 @@ from __future__ import annotations
 
 APP_VERSION = "1.0.0"
 # Overwritten on each official build. Source / unstamped runs use this baseline.
-BUILD_STAMP = "20261122-094441"
+BUILD_STAMP = "20261122-095345"
 GITHUB_OWNER = "ProOnlyUNO"
 GITHUB_REPO = "CC-Music"
 RELEASE_TAG = "v1.0.0"
