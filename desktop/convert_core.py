@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
+from meta_parse import meta_from_path, safe_folder
 from name_sanitize import clean_stem_for_output
 
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".webm", ".wma"}
@@ -127,6 +128,20 @@ def collect_inputs(paths) -> list[Path]:
     return files
 
 
+def _path_meta_for_src(src: Path, input_roots: list[Path] | None):
+    """Use Artist/Album folders only when the file sits under an input root tree."""
+    src = Path(src)
+    for root in input_roots or []:
+        try:
+            rel = src.resolve().relative_to(Path(root).resolve())
+        except ValueError:
+            continue
+        # Artist/Album/Song.ext or Artist/Song.ext — ignore flat dump roots
+        if len(rel.parts) >= 2:
+            return meta_from_path(src, library_root=root)
+    return None
+
+
 def build_plan(
     files,
     out_root: Path,
@@ -136,11 +151,20 @@ def build_plan(
     keep_duplicates: bool,
     title_first: bool = False,
     ffprobe=None,
+    input_roots: list[Path] | None = None,
 ):
     plan, seen = [], {}
     for src in files:
         artist, title = parse_name(src.stem, title_first)
         album = None
+        path_meta = _path_meta_for_src(src, input_roots)
+        if path_meta is not None and path_meta.artist.lower() not in {"unknown", "unsorted"}:
+            if not artist or artist.lower() in {"unsorted", "unknown"}:
+                artist = path_meta.artist
+            album = path_meta.album
+            if path_meta.title:
+                title = path_meta.title
+
         if ffprobe:
             tags = read_tags(ffprobe, src)
             if tags.get("title"):
@@ -150,15 +174,20 @@ def build_plan(
                     _strip_junk_groups(clean_stem_for_output(tags["title"])),
                 ).strip()
             artist = tags.get("album_artist") or tags.get("artist") or artist
-            album = tags.get("album")
+            album = tags.get("album") or album
         # Fallback stem also strips [youtubeId] so convert of already-suffixed
         # downloads (or old libraries) does not keep the ID in .dfpwm names.
         title = _safe(title, keep_unicode) or _safe(
             clean_stem_for_output(src.stem), keep_unicode
         ) or "Untitled"
 
-        folder_artist = forced_artist or primary_artist(artist) or "Unsorted"
+        folder_artist = forced_artist or primary_artist(artist) or (
+            path_meta.artist if path_meta else None
+        ) or "Unsorted"
         folder_artist = _safe(folder_artist, keep_unicode) or "Unsorted"
+        if not album:
+            album = path_meta.album if path_meta else "Singles"
+        album = safe_folder(album or "Singles", "Singles")
 
         folder = out_root if flat else out_root / folder_artist
         if album and not flat:
@@ -173,6 +202,7 @@ def build_plan(
                     {
                         "src": src,
                         "dst": None,
+                        "lrc_src": None,
                         "shown": "",
                         "note": f"duplicate of {seen[key].name}",
                     }
@@ -185,10 +215,12 @@ def build_plan(
             key = (str(folder).lower(), title.lower())
         seen[key] = src
         dst = folder / f"{title}.dfpwm"
+        lrc_src = src.with_suffix(".lrc")
         plan.append(
             {
                 "src": src,
                 "dst": dst,
+                "lrc_src": lrc_src if lrc_src.is_file() else None,
                 "shown": dst.relative_to(out_root).as_posix(),
                 "note": "",
             }
@@ -268,16 +300,19 @@ def run_convert(
         if log:
             log(msg)
 
-    files = collect_inputs(inputs)
+    input_paths = [Path(p) for p in inputs]
+    files = collect_inputs(input_paths)
     if not files:
         raise RuntimeError("No audio files found in the selected folder/files.")
 
     out_root = Path(out_dir)
-    ffprobe = None
-    if use_tags:
-        ffprobe = shutil.which("ffprobe")
-        if not ffprobe:
-            _log("! ffprobe not found — ignoring Use tags (comes with ffmpeg)")
+    input_roots = [p.resolve() if p.is_dir() else p.parent.resolve() for p in input_paths]
+    # Prefer embedded tags from download (artist/title/album) whenever ffprobe exists.
+    ffprobe = shutil.which("ffprobe")
+    if use_tags and not ffprobe:
+        _log("! ffprobe not found — install ffmpeg so tags can drive Artist/Album")
+    elif ffprobe and not use_tags:
+        _log("Reading embedded tags for Artist/Album layout (from download metadata).")
 
     plan = build_plan(
         files,
@@ -288,6 +323,7 @@ def run_convert(
         keep_duplicates,
         title_first,
         ffprobe,
+        input_roots=input_roots,
     )
 
     _log(f"{len(plan)} file(s) planned → {out_root}")
@@ -327,6 +363,19 @@ def run_convert(
             if ok:
                 done += 1
                 total_bytes += info
+                # Keep .lrc beside the final .dfpwm (Artist/Album/Song.lrc)
+                lrc_src = it.get("lrc_src")
+                dst = it.get("dst")
+                if lrc_src and dst and Path(lrc_src).is_file():
+                    lrc_dst = Path(dst).with_suffix(".lrc")
+                    try:
+                        lrc_dst.parent.mkdir(parents=True, exist_ok=True)
+                        data = Path(lrc_src).read_bytes()
+                        if not lrc_dst.exists() or overwrite:
+                            lrc_dst.write_bytes(data)
+                            _log(f"  lrc {lrc_dst.relative_to(out_root).as_posix()}")
+                    except OSError as e:
+                        _log(f"  warn: could not copy lyrics: {e}")
                 _log(f"  ok  {it['shown']}  ({info / 1048576:.2f} MB)")
             else:
                 failed += 1
@@ -337,7 +386,7 @@ def run_convert(
         f"Output: {out_root.resolve()}  ({total_bytes / 1048576:.1f} MB)"
     )
     if done:
-        _log("Next: drag artist folders into Importer.lua / uploader in-game.")
+        _log("Next: drag Artist/Album folders into Importer.lua / uploader in-game.")
     return {
         "done": done,
         "skipped": skipped,

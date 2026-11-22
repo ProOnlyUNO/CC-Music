@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+import lyrics_core
+from meta_parse import TrackMeta, artist_album_dest, resolve_track_meta, safe_filename_stem
 from name_sanitize import sanitize_media_path, unique_filename
 
 LogFn = Callable[[str], None]
@@ -34,6 +36,17 @@ class PlaylistEntry:
     url: str
     duration: int | None = None
     uploader: str | None = None
+    artist: str | None = None
+    album: str | None = None
+    track_title: str | None = None
+
+
+@dataclass
+class DownloadedTrack:
+    path: Path
+    meta: TrackMeta
+    entry: PlaylistEntry
+    lrc: Path | None = None
 
 
 def _import_yt_dlp():
@@ -177,6 +190,23 @@ def _entries_from_info(
         except (TypeError, ValueError):
             duration_i = None
         uploader = raw.get("uploader") or raw.get("channel") or raw.get("artist")
+        uploader_s = str(uploader).strip() if uploader else None
+        raw_artist = raw.get("artist") or raw.get("creator") or raw.get("album_artist")
+        # Prefer real album tags; avoid playlist *id* strings from flat entries.
+        raw_album = raw.get("album")
+        if not raw_album:
+            cand = raw.get("playlist_title") or raw.get("playlist")
+            if cand and not re.fullmatch(r"[\w-]{10,}", str(cand).strip()):
+                raw_album = cand
+        raw_track = raw.get("track") or raw.get("alt_title")
+        meta = resolve_track_meta(
+            title=title,
+            uploader=uploader_s,
+            playlist_title=playlist_title,
+            artist_hint=str(raw_artist).strip() if raw_artist else None,
+            album_hint=str(raw_album).strip() if raw_album else None,
+            track_title_hint=str(raw_track).strip() if raw_track else None,
+        )
         entries.append(
             PlaylistEntry(
                 index=i,
@@ -184,7 +214,10 @@ def _entries_from_info(
                 title=title,
                 url=entry_url,
                 duration=duration_i,
-                uploader=str(uploader).strip() if uploader else None,
+                uploader=uploader_s,
+                artist=meta.artist,
+                album=meta.album,
+                track_title=meta.title,
             )
         )
     return playlist_title, entries
@@ -311,20 +344,95 @@ def format_duration(seconds: int | None) -> str:
     return f"{m}:{s:02d}"
 
 
-def _download_one_api(yt_dlp, entry: PlaylistEntry, outtmpl: str, log: LogFn | None) -> Path | None:
+def entry_meta(entry: PlaylistEntry, playlist_title: str | None = None) -> TrackMeta:
+    """Resolve artist/album/title for an entry (playlist meta preferred)."""
+    return resolve_track_meta(
+        title=entry.title,
+        uploader=entry.uploader,
+        playlist_title=playlist_title,
+        artist_hint=entry.artist,
+        album_hint=entry.album,
+        track_title_hint=entry.track_title,
+    )
+
+
+def _embed_tags_ffmpeg(path: Path, meta: TrackMeta, log: LogFn | None = None) -> None:
+    """Write artist/title/album tags so LRCLIB + convert still see them after rename."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not path.is_file():
+        return
+    tmp = path.with_name(path.stem + ".tagpart" + path.suffix)
+    cmd = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(path),
+        "-codec",
+        "copy",
+        "-map_metadata",
+        "0",
+        "-metadata",
+        f"artist={meta.artist}",
+        "-metadata",
+        f"album_artist={meta.artist}",
+        "-metadata",
+        f"title={meta.title}",
+        "-metadata",
+        f"album={meta.album}",
+        str(tmp),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if r.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+            tmp.replace(path)
+        elif tmp.exists():
+            tmp.unlink(missing_ok=True)
+            if log:
+                log("  warn: could not embed tags (ffmpeg)")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        if log:
+            log(f"  warn: tag embed failed: {e}")
+
+
+def _download_one_api(
+    yt_dlp,
+    entry: PlaylistEntry,
+    outtmpl: str,
+    meta: TrackMeta,
+    log: LogFn | None,
+) -> Path | None:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
+        # Prefer keeping artist/title in tags even after filename cleanup.
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
                 "preferredcodec": "mp3",
                 "preferredquality": "0",
-            }
+            },
+            {"key": "FFmpegMetadata", "add_metadata": True},
         ],
+        "postprocessor_args": {
+            "ffmpeg": [
+                "-metadata",
+                f"artist={meta.artist}",
+                "-metadata",
+                f"album_artist={meta.artist}",
+                "-metadata",
+                f"title={meta.title}",
+                "-metadata",
+                f"album={meta.album}",
+            ]
+        },
         "logger": _logger(log),
     }
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -343,7 +451,13 @@ def _download_one_api(yt_dlp, entry: PlaylistEntry, outtmpl: str, log: LogFn | N
     return None
 
 
-def _download_one_exe(exe: str, entry: PlaylistEntry, outtmpl: str, log: LogFn | None) -> Path | None:
+def _download_one_exe(
+    exe: str,
+    entry: PlaylistEntry,
+    outtmpl: str,
+    meta: TrackMeta,
+    log: LogFn | None,
+) -> Path | None:
     cmd = [
         exe,
         "--no-warnings",
@@ -353,6 +467,13 @@ def _download_one_exe(exe: str, entry: PlaylistEntry, outtmpl: str, log: LogFn |
         "mp3",
         "--audio-quality",
         "0",
+        "--embed-metadata",
+        "--parse-metadata",
+        f"{meta.artist}:%(artist)s",
+        "--parse-metadata",
+        f"{meta.title}:%(title)s",
+        "--parse-metadata",
+        f"{meta.album}:%(album)s",
         "-o",
         outtmpl,
         "--print",
@@ -372,16 +493,65 @@ def _download_one_exe(exe: str, entry: PlaylistEntry, outtmpl: str, log: LogFn |
     return None
 
 
+def organize_tracks(
+    tracks: Sequence[DownloadedTrack],
+    library_root: str | Path,
+    *,
+    log: LogFn | None = None,
+) -> Path:
+    """Move MP3 + sibling .lrc into ``library_root/Artist/Album/Song.*``."""
+    root = Path(library_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    reserved: set[str] = set()
+    for t in tracks:
+        if not t.path.exists():
+            continue
+        old_path = t.path
+        old_lrc = None
+        if t.lrc and t.lrc.exists():
+            old_lrc = t.lrc
+        elif old_path.with_suffix(".lrc").exists():
+            old_lrc = old_path.with_suffix(".lrc")
+
+        dest = artist_album_dest(root, t.meta, t.path.suffix, reserved=reserved)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.resolve() != old_path.resolve():
+            if dest.exists():
+                dest.unlink()
+            old_path.rename(dest)
+            if log:
+                log(f"  organize → {dest.relative_to(root).as_posix()}")
+        t.path = dest
+
+        new_lrc = dest.with_suffix(".lrc")
+        if old_lrc is not None and old_lrc.exists():
+            if old_lrc.resolve() != new_lrc.resolve():
+                if new_lrc.exists():
+                    new_lrc.unlink()
+                old_lrc.rename(new_lrc)
+            t.lrc = new_lrc
+        else:
+            t.lrc = new_lrc if new_lrc.exists() else None
+    if log:
+        log(f"Organized into Artist/Album under {root}")
+    return root
+
+
 def download_entries(
     entries: Sequence[PlaylistEntry],
     out_dir: str | Path,
     *,
+    playlist_title: str | None = None,
+    fetch_lyrics: bool = True,
+    lyrics_delay: float = lyrics_core.DEFAULT_DELAY,
     log: LogFn | None = None,
     should_cancel: CancelFn | None = None,
-) -> tuple[int, int, Path]:
+) -> tuple[int, int, Path, list[DownloadedTrack]]:
     """Download selected playlist entries as MP3 into out_dir.
 
-    Returns (ok_count, fail_count, out_path).
+    Lyrics are fetched **before** the clean rename finishes pairing, using
+    playlist/artist metadata so LRCLIB still sees the real artist after any
+    ``[videoId]`` strip. Returns (ok_count, fail_count, out_path, tracks).
     """
     out = Path(out_dir).expanduser().resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -397,6 +567,8 @@ def download_entries(
     if log:
         log(f"Downloading {len(selected)} track(s) as MP3 → {out}")
         log(msg)
+        if fetch_lyrics:
+            log("Auto-fetch lyrics (LRCLIB) using playlist artist/title before clean rename.")
         if not shutil.which("ffmpeg"):
             log("Note: ffmpeg not on PATH — MP3 extract may fail. Install: winget install ffmpeg")
 
@@ -405,6 +577,7 @@ def download_entries(
 
     ok_count = 0
     fail_count = 0
+    downloaded: list[DownloadedTrack] = []
 
     for n, entry in enumerate(selected, start=1):
         if should_cancel and should_cancel():
@@ -412,7 +585,13 @@ def download_entries(
                 log("Cancelled.")
             break
 
-        safe = _safe_filename(entry.title)
+        meta = entry_meta(entry, playlist_title)
+        # Keep entry fields in sync for later organize / UI
+        entry.artist = meta.artist
+        entry.album = meta.album
+        entry.track_title = meta.title
+
+        safe = _safe_filename(entry.track_title or entry.title)
         # Clean outtmpl — no [youtubeId] suffix (kept unique via index + disambiguator).
         base_stem = f"{entry.index:03d} - {safe}"
         reserved_names = {p.name.lower() for p in out.iterdir()} if out.exists() else set()
@@ -428,27 +607,71 @@ def download_entries(
         outtmpl = str(out / f"{claimed_stem}.%(ext)s")
 
         if log:
-            log(f"[{n}/{len(selected)}] {entry.title}")
+            log(f"[{n}/{len(selected)}] {meta.artist} — {meta.title}")
 
         try:
             produced: Path | None
             if yt_dlp is not None:
-                produced = _download_one_api(yt_dlp, entry, outtmpl, log)
+                produced = _download_one_api(yt_dlp, entry, outtmpl, meta, log)
             else:
                 assert exe
-                produced = _download_one_exe(exe, entry, outtmpl, log)
+                produced = _download_one_exe(exe, entry, outtmpl, meta, log)
 
             if produced is None:
                 matches = list(out.glob(f"{claimed_stem}.*"))
-                produced = matches[0] if matches else None
+                audio_matches = [p for p in matches if p.suffix.lower() != ".lrc"]
+                produced = audio_matches[0] if audio_matches else (matches[0] if matches else None)
 
-            # Belt-and-suspenders: strip any trailing [youtubeId] yt-dlp/templates left,
-            # and keep a matching .lrc renamed in lockstep.
+            lrc_path: Path | None = None
             if produced is not None and produced.exists():
+                # Prefer tags even if yt-dlp metadata PP was skipped.
+                _embed_tags_ffmpeg(produced, meta, log=log)
+
+                # Lyrics WHILE artist/title are known — write beside current file,
+                # then sanitize_media_path renames .lrc in lockstep with the audio.
+                if fetch_lyrics:
+                    _status, lrc_path = lyrics_core.fetch_beside(
+                        produced,
+                        artist=meta.artist,
+                        title=meta.title,
+                        album=meta.album,
+                        delay=lyrics_delay,
+                        log=log,
+                    )
+
                 cleaned = sanitize_media_path(produced, reserved=reserved_names)
                 if cleaned != produced and log:
                     log(f"  renamed → {cleaned.name}")
                 produced = cleaned
+                if lrc_path is not None:
+                    sibling = produced.with_suffix(".lrc")
+                    lrc_path = sibling if sibling.exists() else (lrc_path if lrc_path.exists() else None)
+
+                # Prefer final clean title as filename stem (drop 001 - prefix when organizing later)
+                final_stem = safe_filename_stem(meta.title)
+                if produced.stem != final_stem:
+                    target_name = unique_filename(
+                        produced.parent,
+                        f"{final_stem}{produced.suffix}",
+                        reserved=reserved_names,
+                        disambiguator=entry.id,
+                    )
+                    target = produced.parent / target_name
+                    if target.resolve() != produced.resolve():
+                        old_lrc = produced.with_suffix(".lrc")
+                        produced.rename(target)
+                        if old_lrc.exists():
+                            new_lrc = target.with_suffix(".lrc")
+                            if not new_lrc.exists():
+                                old_lrc.rename(new_lrc)
+                            lrc_path = new_lrc if new_lrc.exists() else lrc_path
+                        produced = target
+                        if log:
+                            log(f"  clean name → {produced.name}")
+
+                downloaded.append(
+                    DownloadedTrack(path=produced, meta=meta, entry=entry, lrc=lrc_path)
+                )
 
             if log:
                 log(f"  OK → {produced.name if produced else '(done)'}")
@@ -461,7 +684,7 @@ def download_entries(
     if log:
         log(f"Done. Saved {ok_count}, failed {fail_count}. Folder: {out}")
 
-    return ok_count, fail_count, out
+    return ok_count, fail_count, out, downloaded
 
 
 def download_by_indices(
@@ -469,14 +692,22 @@ def download_by_indices(
     indices: Iterable[int],
     out_dir: str | Path,
     *,
+    fetch_lyrics: bool = True,
     log: LogFn | None = None,
     should_cancel: CancelFn | None = None,
-) -> tuple[int, int, Path]:
+) -> tuple[int, int, Path, list[DownloadedTrack]]:
     """Convenience: re-list playlist and download by 1-based indices."""
-    _title, entries = list_playlist(url, log=log)
+    title, entries = list_playlist(url, log=log)
     wanted = {int(i) for i in indices}
     selected = [e for e in entries if e.index in wanted]
     missing = wanted - {e.index for e in selected}
     if missing and log:
         log(f"Note: indices not in playlist: {sorted(missing)}")
-    return download_entries(selected, out_dir, log=log, should_cancel=should_cancel)
+    return download_entries(
+        selected,
+        out_dir,
+        playlist_title=title,
+        fetch_lyrics=fetch_lyrics,
+        log=log,
+        should_cancel=should_cancel,
+    )

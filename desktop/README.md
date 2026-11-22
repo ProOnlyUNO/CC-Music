@@ -4,8 +4,8 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 
 **Developer: ProOnlyUNO** · v1.0.0
 
-1. **Download** — YouTube playlist/album URL → pick tracks → MP3 (via **yt-dlp**)
-2. **Convert** — MP3 / WAV / FLAC / … → `.dfpwm`
+1. **Download** — YouTube playlist/album → MP3 (yt-dlp) → auto LRCLIB lyrics → optional **Artist/Album** folders
+2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc`)
 3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
 4. **How to use** / **Commands** — friendly in-app guides
 
@@ -31,8 +31,10 @@ Dev shortcut: double-click **`dist\CC_Music_Tools.exe`**.
 3. Click **Fetch titles** — checklist of tracks appears.
 4. Select the songs you want (Select all / Select none).
 5. Pick an MP3 download folder → **Download selected MP3s**.
-6. Click **Send folder → Convert** (or Convert will open after a successful download).
-7. On **Convert**, turn those MP3s into `.dfpwm`.
+6. Lyrics are fetched automatically (artist/title kept in tags) before clean rename.
+7. When prompted, pick a library root → files land as `Artist/Album/Song.mp3` (+ `.lrc`).
+8. Click **Send folder → Convert** (offered after a successful download).
+9. On **Convert**, turn those MP3s into `Artist/Album/Song.dfpwm`.
 
 Uses **yt-dlp** in-app (more reliable than browser scrapers). Keep yt-dlp updated.
 
@@ -58,10 +60,10 @@ Start with **`setup/START_HERE.txt`**.
 
 ## Desktop flow → Minecraft
 
-1. **Download** (optional) songs as MP3, or use your own files
-2. **Convert** songs to `.dfpwm`
-3. **Fetch lyrics** (optional)
-4. Copy files into the game
+1. **Download** (optional) → auto lyrics → organize `Artist/Album`
+2. **Convert** to `.dfpwm` (keeps Artist/Album + copies `.lrc`)
+3. **Fetch lyrics** again only if you need a library re-scan
+4. Copy Artist/Album trees into the game
 5. Run **Importer** and drag-drop onto the **computer screen**
 6. Restart jukebox so tracks with lyrics show `(L)`
 

@@ -272,6 +272,53 @@ def write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
+def fetch_beside(
+    dest_audio: Path,
+    *,
+    artist: str,
+    title: str,
+    album: str = "Singles",
+    delay: float = DEFAULT_DELAY,
+    overwrite: bool = False,
+    log: LogFn | None = None,
+) -> tuple[str, Path | None]:
+    """Fetch LRCLIB lyrics and write ``.lrc`` beside *dest_audio*.
+
+    Call this while artist/title are still known (playlist meta / tags),
+    ideally before or alongside a clean rename so the query uses real names.
+
+    Returns ``(status, lrc_path_or_None)`` where status is matched /
+    instrumental / miss / error / skipped.
+    """
+    dest_audio = Path(dest_audio)
+    beside = dest_audio.with_suffix(".lrc")
+    if beside.is_file() and beside.stat().st_size > 0 and not overwrite:
+        if log:
+            log(f"  lyrics: skip existing {beside.name}")
+        return "skipped", beside
+
+    if log:
+        log(f"  lyrics: {artist} / {album} / {title}")
+    text, status = fetch_lyrics(artist, title, album, max(0.2, float(delay)))
+    if status == "matched" and text:
+        write_text(beside, text)
+        if log:
+            log(f"  lyrics → matched ({beside.name})")
+        return "matched", beside
+    if status == "instrumental":
+        write_text(beside, "; instrumental (lrclib)\n")
+        if log:
+            log("  lyrics → instrumental")
+        return "instrumental", beside
+    if status == "error":
+        if log:
+            log("  lyrics → error")
+        return "error", None
+    if log:
+        log("  lyrics → miss")
+    return "miss", None
+
+
 def run_fetch(
     roots: list[str | Path],
     *,
