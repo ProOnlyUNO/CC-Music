@@ -1085,8 +1085,8 @@ Run once (no startup)
 
 Music library helpers (main PC)
   sort-music                        preview tidy + merges/deletes (no writes)
-  sort-music --apply                nest + root + SFX + lyrics + delete audio dupes
-  sort-music --apply --safe         tidy without deleting audio dupes
+  sort-music --apply                nest + root + SFX + lyrics (no audio deletes)
+  sort-music --apply --dedupe       also delete confirmed audio extras only
   sort-music --apply --lyrics-only  place orphan .lrc beside songs (+ root cleanup)
   lyrics-status                     count tracks with / without .lrc
   delete-music                      pick Artist → Album → Song (or DELETE ALBUM)

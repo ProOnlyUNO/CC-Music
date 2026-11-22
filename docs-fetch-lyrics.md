@@ -55,11 +55,12 @@ sort-music --apply --lyrics-only   -- place every matched .lrc beside its .dfpwm
 lyrics-status                      -- optional: count with/missing .lrc after sort
 ```
 
-Full tidy (nest + SFX + lyrics + audio dupe cleanup):
+Full tidy (nest + SFX + lyrics; albums survive — audio deletes opt-in):
 
 ```text
-sort-music --apply              -- includes dupe cleanup (keeps best .dfpwm+.lrc)
-sort-music --apply --safe       -- tidy without deleting audio dupes
+sort-music --apply              -- tidy only (no audio deletes)
+sort-music --apply --dedupe     -- also delete confirmed audio extras
+sort-music --dedupe             -- dry-run would-delete preview
 ```
 
 ### Matching (Importer and sort-music)
@@ -79,7 +80,7 @@ It **prefers copying beside** that song’s `.dfpwm` on the song’s disk, then 
 | Step | Action |
 |------|--------|
 | SFX | Creates `/sfx`, moves loose root `SFX*.dfpwm` into it |
-| Music | `Artist - Album` → `Artist/Album`; `Singles - Title` → Singles album + Title; `Name 2` collisions merge into `Name`; bare tracks → `Singles/`. Audio **dupe cleanup ON** (keep best `.dfpwm`+`.lrc`, prefer Artist/Album); `--safe` / `--no-dedupe` skips deletes |
+| Music | `Artist - Album` → `Artist/Album`; `Singles - Title` → Singles album + Title; `Name 2` merges into `Name` only when `Name` exists; bare tracks → `Singles/`. Audio deletes **OFF** by default; `--dedupe` removes confirmed same-size extras only (never sole/protected album copies) |
 | Root | Loose computer-root `.dfpwm` + `.lrc` → disks; leftovers cleared. Keeps `*.lua` / `startup` / library dirs |
 | Lyrics | Recursive `.lrc` find + match; place beside `.dfpwm`; mirror `/lyrics`; dedupe extra `.lrc`; clear consumed flat drops |
 

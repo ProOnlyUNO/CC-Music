@@ -4,9 +4,11 @@
   Does all of:
     1) Music:  Artist - Album → Artist/Album ; bare Artist/*.dfpwm → Artist/Singles
                "Singles - Title" → Album=Singles + song Title (not artist Singles)
-               "Name 2" / "Name_2" / "Name (2)" treated as collision dupes of Name
-               + cross-disk audio dedupe (ON with --apply; dry-run reports only)
+               "Name 2" / "Name_2" / "Name (2)" merge into Name only when Name exists
+               + opt-in cross-disk audio dedupe (--dedupe; dry-run reports only)
                  Keep best .dfpwm+.lrc pair; prefer Artist/Album path; delete extras
+                 NEVER delete a sole library copy or a protected Artist/Album track
+                 unless another same-size copy is confirmed kept
                  + prune leftover empty " 2" folders after merge
     2) SFX:    create /sfx ; move loose root SFX*.dfpwm into it (not audio-deduped)
     3) Root:   loose root .dfpwm + .lrc → match/move onto disks; clear leftovers
@@ -21,9 +23,11 @@
 
   Usage:
       sort-music                  -- dry-run preview (report only; no writes)
-      sort-music --apply          -- nest + Singles + root + SFX + lyrics + dupe cleanup
-      sort-music --apply --safe   -- nest/Singles/root/SFX/lyrics, never delete audio
-      sort-music --apply --no-dedupe  -- same as --safe for audio deletes
+      sort-music --apply          -- nest + Singles + root + SFX + lyrics (NO audio deletes)
+      sort-music --apply --dedupe -- also delete confirmed audio extras
+      sort-music --apply --safe   -- same as --apply (audio deletes stay off)
+      sort-music --apply --no-dedupe  -- alias of --safe
+      sort-music --dedupe         -- dry-run that reports would-delete audio extras
       sort-music --apply --lyrics-only
       sort-music --apply --no-lyrics
       sort-music --apply --no-mirror
@@ -50,7 +54,8 @@ local opts = {
   doLyrics = true,
   doRoot = true, -- clear loose .dfpwm/.lrc from computer root onto disks
   mirror = true,
-  dedupe = true, -- default ON; dry-run still only reports. Use --safe / --no-dedupe to skip.
+  -- Audio deletes are OPT-IN. --apply alone must never wipe albums.
+  dedupe = false,
   pack = nil,
 }
 
@@ -84,11 +89,13 @@ for _, a in ipairs(rawArgs) do
   elseif lower == "--help" or lower == "-h" then
     print("sort-music [--apply] [packDir] [--lyrics-only] [--no-lyrics] [--no-mirror]")
     print("  Dry-run by default (no writes). --apply writes.")
-    print("  Music nest + Singles + root cleanup + SFX + lyrics + audio dupe cleanup.")
-    print("  Collision folders (Name 2 / Name_2) merge into Name; Singles - Title → Singles/Title.")
-    print("  Dupes: keep best .dfpwm+.lrc pair; prefer Artist/Album; delete extras.")
+    print("  Music nest + Singles + root cleanup + SFX + lyrics.")
+    print("  Collision folders (Name 2) merge into Name only when Name already exists.")
+    print("  Audio deletes OFF by default. Pass --dedupe to remove confirmed extras.")
+    print("  Dupes: keep best .dfpwm+.lrc; never delete sole copy or protected album track")
+    print("    unless another same-size copy is kept. Prefer keep-with-lyrics.")
     print("  Root: move loose .dfpwm/.lrc onto disks; never deletes *.lua / startup.")
-    print("  --safe / --no-dedupe skips audio deletes. --dedupe forces them on.")
+    print("  --safe / --no-dedupe keep audio deletes off. --dedupe opts them in.")
     print("  Recursively finds .lrc; matches basename/tags/fuzzy; places beside .dfpwm.")
     print("  Drop flat .lrc on computer/disk root, then: sort-music --apply --lyrics-only")
     return
@@ -297,6 +304,12 @@ end
 -- Forward-declared: defined with music helpers; used by movePath at runtime.
 local hasBesideLrc
 
+-- Same-content proxy for CC (no cheap hash): equal positive sizes.
+local function sameAudioSize(pathA, pathB)
+  local sa, sb = fileSize(pathA), fileSize(pathB)
+  return sa > 0 and sb > 0 and sa == sb
+end
+
 local function movePath(src, dst)
   if opts.dryRun then return true, nil, dst end
   if src == dst then return true, nil, dst end
@@ -304,15 +317,21 @@ local function movePath(src, dst)
   if parent and parent ~= "" then ensureDir(parent) end
   if fs.exists(dst) then
     -- Audio/lyrics: prefer the copy with a beside .lrc pair; never mint "Name 2"
+    -- Different sizes = different songs that collided on name → keep both.
     local dstName = fs.getName(dst)
     if isAudio(dstName) and isAudio(fs.getName(src)) then
-      local srcPair = hasBesideLrc and hasBesideLrc(src)
-      local dstPair = hasBesideLrc and hasBesideLrc(dst)
-      if srcPair and not dstPair then
-        pcall(fs.delete, dst)
+      if sameAudioSize(src, dst) then
+        local srcPair = hasBesideLrc and hasBesideLrc(src)
+        local dstPair = hasBesideLrc and hasBesideLrc(dst)
+        if srcPair and not dstPair then
+          pcall(fs.delete, dst)
+        else
+          pcall(fs.delete, src)
+          return true, nil, dst
+        end
       else
-        pcall(fs.delete, src)
-        return true, nil, dst
+        local dir = fs.getDir(dst)
+        dst = fs.combine(dir, uniqueName(dir, dstName))
       end
     elseif isLrc(dstName) and isLrc(fs.getName(src)) then
       pcall(fs.delete, src)
@@ -449,6 +468,8 @@ local function betterAudio(a, b)
 end
 
 -- Merge every file from srcDir into destDir; delete srcDir when empty.
+-- Audio: only drop a file when the kept copy is same-size (true extra).
+-- Different sizes keep both (unique name). Prefer keep-with-lyrics.
 local function mergeDirInto(srcDir, destDir, label)
   if srcDir == destDir then return 0 end
   print((opts.dryRun and "  ~ merge " or "  merge ") .. srcDir .. " → " .. destDir
@@ -456,7 +477,21 @@ local function mergeDirInto(srcDir, destDir, label)
   local moved = 0
   if opts.dryRun then
     for _, f in ipairs(listDir(srcDir)) do
-      moved = moved + 1
+      local src = fs.combine(srcDir, f)
+      local dst = fs.combine(destDir, f)
+      if fs.isDir(src) then
+        moved = moved + 1
+      elseif fs.exists(dst) and isAudio(f) and not sameAudioSize(src, dst) then
+        print("  ~ keep-both (size mismatch) " .. src .. " vs " .. dst)
+        moved = moved + 1
+      elseif fs.exists(dst) and isAudio(f) then
+        local srcPair, dstPair = hasBesideLrc(src), hasBesideLrc(dst)
+        local drop = (srcPair and not dstPair) and dst or src
+        print("  ~ would-delete dupe " .. drop .. " (keep pair-prefer)")
+        moved = moved + 1
+      else
+        moved = moved + 1
+      end
     end
     return moved
   end
@@ -468,18 +503,35 @@ local function mergeDirInto(srcDir, destDir, label)
       moved = moved + mergeDirInto(src, dst, nil)
     else
       if fs.exists(dst) then
-        -- Prefer keeper with beside .lrc; else keep existing dest and drop src
-        local srcIsAudio, dstIsAudio = isAudio(f), isAudio(f)
-        if srcIsAudio and dstIsAudio then
-          local srcPair = hasBesideLrc(src)
-          local dstPair = hasBesideLrc(dst)
-          if srcPair and not dstPair then
-            deletePath(dst)
-            local ok = select(1, movePath(src, dst))
-            if ok then moved = moved + 1 end
+        if isAudio(f) then
+          if sameAudioSize(src, dst) then
+            local srcPair = hasBesideLrc(src)
+            local dstPair = hasBesideLrc(dst)
+            if srcPair and not dstPair then
+              -- Prefer lyrics pair: replace dest only after src is safe to move
+              local tmp = fs.combine(destDir, ".merge-tmp-" .. f)
+              local okMove = select(1, movePath(src, tmp))
+              if okMove then
+                deletePath(dst)
+                local ok2 = select(1, movePath(tmp, dst))
+                if ok2 then moved = moved + 1
+                else
+                  -- Restore: put tmp back as unique name so nothing is lost
+                  movePath(tmp, fs.combine(destDir, uniqueName(destDir, f)))
+                  moved = moved + 1
+                end
+              end
+            else
+              print("  delete dupe " .. src .. " (kept " .. dst .. ")")
+              deletePath(src)
+              moved = moved + 1
+            end
           else
-            deletePath(src)
-            moved = moved + 1
+            -- Different song content sharing a name — keep both
+            local alt = fs.combine(destDir, uniqueName(destDir, f))
+            print("  keep-both " .. src .. " → " .. alt)
+            local ok = select(1, movePath(src, alt))
+            if ok then moved = moved + 1 end
           end
         else
           -- non-audio clash: keep dest, drop src duplicate name
@@ -515,7 +567,9 @@ local function pruneEmptyDirs(dir, depth)
   return n
 end
 
--- Fold "Album 2" / "Album_2" sibling dirs into canonical "Album".
+-- Fold "Album 2" / "Album_2" sibling dirs into canonical "Album"
+-- ONLY when the canonical folder already exists (or multiple collision siblings).
+-- Never rename a sole "Volume 2" / "Name 2" album — it may be a real title.
 local function mergeCollisionAlbums(artistDir)
   local merged = 0
   local children = listDir(artistDir)
@@ -530,40 +584,28 @@ local function mergeCollisionAlbums(artistDir)
   end
   for canon, group in pairs(byCanon) do
     if #group >= 2 then
-      table.sort(group, function(a, b)
-        local ac = (a.name == canon) and 0 or 1
-        local bc = (b.name == canon) and 0 or 1
-        if ac ~= bc then return ac < bc end
-        return a.name < b.name
-      end)
-      local keep = group[1]
-      -- Prefer exact canon folder name as destination
+      -- Only merge when the real canonical folder exists among siblings
+      -- (or on disk). Never fold "Volume 2"+"Volume 3" into a new "Volume".
       local dest = fs.combine(artistDir, canon)
-      if keep.name ~= canon then
-        if opts.dryRun or not fs.exists(dest) then
-          print((opts.dryRun and "  ~ rename " or "  rename ")
-            .. keep.path .. " → " .. dest)
-          if not opts.dryRun then
-            ensureDir(fs.getDir(dest))
-            pcall(fs.move, keep.path, dest)
-          end
-          keep.path = dest
-          keep.name = canon
-        end
+      local keep = nil
+      for _, g in ipairs(group) do
+        if g.name == canon then keep = g break end
       end
-      for i = 2, #group do
-        merged = merged + mergeDirInto(group[i].path, keep.path, "collision")
+      if not keep and fs.exists(dest) and fs.isDir(dest) then
+        keep = { name = canon, path = dest }
+      end
+      if keep then
+        for i = 1, #group do
+          if group[i].path ~= keep.path then
+            merged = merged + mergeDirInto(group[i].path, keep.path, "collision")
+          end
+        end
       end
     elseif #group == 1 and group[1].name ~= canon then
       local dest = fs.combine(artistDir, canon)
-      if not fs.exists(dest) then
-        print((opts.dryRun and "  ~ rename " or "  rename ")
-          .. group[1].path .. " → " .. dest)
-        if not opts.dryRun then
-          pcall(fs.move, group[1].path, dest)
-        end
-        merged = merged + 1
-      else
+      -- Sole collision-looking name: only merge if canon already exists.
+      -- Do NOT rename sole "Album 2" → "Album" (destroys real numbered albums).
+      if fs.exists(dest) and fs.isDir(dest) then
         merged = merged + mergeDirInto(group[1].path, dest, "collision")
       end
     end
@@ -671,16 +713,12 @@ local function runMusic()
             end
           end
           -- Collision-named artist folders: "Panic 2" → merge into "Panic"
+          -- only when Panic already exists. Never rename a sole "Name 2" artist.
           local canonEntry = select(1, stripCollisionSuffix(entry))
           if canonEntry ~= entry then
             local destArtist = fs.combine(root, canonEntry)
             if fs.exists(destArtist) and fs.isDir(destArtist) then
               collisionMerged = collisionMerged + mergeDirInto(entryPath, destArtist, "artist-collision")
-            elseif not fs.exists(destArtist) then
-              print((opts.dryRun and "  ~ rename " or "  rename ")
-                .. entryPath .. " → " .. destArtist)
-              if not opts.dryRun then pcall(fs.move, entryPath, destArtist) end
-              collisionMerged = collisionMerged + 1
             end
           end
         end
@@ -710,7 +748,7 @@ local function runMusic()
     for _, root in ipairs(uniqueLibraryRoots()) do
       pruned = pruned + pruneEmptyDirs(root, 0)
     end
-    print("  audio dedupe skipped (--safe / --no-dedupe)")
+    print("  audio dedupe skipped (pass --dedupe to remove confirmed extras)")
     print(string.format(
       "  nested folders: %d  singles files: %d  collision merges: %d  pruned dirs: %d  audio deduped: 0",
       movedFolders, movedSingles, collisionMerged, pruned
@@ -720,6 +758,8 @@ local function runMusic()
 
   -- Collect every .dfpwm under library roots once (seenPaths guards self-delete).
   -- Group same song across disks/spots; keep best pair / Artist/Album; delete rest.
+  -- Protected Artist/Album tracks are never deleted unless another same-album,
+  -- same-size copy is the confirmed keeper.
   local candidates, seenPaths = {}, {}
 
   local function collectAudio(path, file, artistName, albumName)
@@ -806,6 +846,16 @@ local function runMusic()
     list[#list + 1] = c
   end
 
+  local function isProtectedAlbumTrack(c)
+    return not isWeakArtist(c.artist) and not isWeakAlbum(c.album)
+  end
+
+  local function sameAlbum(a, b)
+    return norm(a.artist) == norm(b.artist) and norm(a.album) == norm(b.album)
+  end
+
+  -- Delete only true extras: keeper confirmed, different path, same size.
+  -- Protected Artist/Album tracks survive unless keeper is same artist+album.
   local function resolveGroup(group)
     if not group or #group < 2 then return end
     -- Unique paths only; skip already-removed files after earlier resolves
@@ -823,11 +873,32 @@ local function runMusic()
     table.sort(uniq, betterAudio)
     local keep = uniq[1]
     local why = keep.hasLrc and "pair+lrc" or "canonical"
+
+    -- Keeper must remain a real on-disk copy (or dry-run stand-in)
+    if not opts.dryRun and not fs.exists(keep.path) then
+      print("  dedupe skip (no keeper on disk) group of " .. keep.songKey)
+      return
+    end
+
     for i = 2, #uniq do
       local loser = uniq[i]
-      if loser.path ~= keep.path then
+      if loser.path == keep.path then
+        -- same path — never self-delete
+      elseif (loser.size or 0) <= 0 or (keep.size or 0) <= 0 or loser.size ~= keep.size then
         print(string.format(
-          "  dedupe audio %s (keep %s [%s])",
+          "  dedupe skip (not same content) %s vs keep %s",
+          loser.path, keep.path
+        ))
+      elseif isProtectedAlbumTrack(loser) and not sameAlbum(keep, loser) then
+        -- Existing album track is the only copy of that album placement — keep it
+        print(string.format(
+          "  dedupe skip (protected album) %s (keep %s untouched)",
+          loser.path, keep.path
+        ))
+      else
+        print(string.format(
+          "  %sdedupe audio %s (keep %s [%s])",
+          opts.dryRun and "~ would-delete " or "",
           loser.path, keep.path, why
         ))
         local ok, err = deletePath(loser.path)
@@ -841,8 +912,8 @@ local function runMusic()
               fs.getDir(keep.path),
               keep.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc"
             )
-            if beside ~= keepBeside and fs.exists(beside) and not fs.isDir(beside) then
-              print("  dedupe orphan-lrc " .. beside)
+            if beside ~= keepBeside and (opts.dryRun or (fs.exists(beside) and not fs.isDir(beside))) then
+              print((opts.dryRun and "  ~ would-delete orphan-lrc " or "  dedupe orphan-lrc ") .. beside)
               deletePath(beside)
             end
           end
@@ -872,19 +943,60 @@ local function runMusic()
         -- Only weak/flat copies of the same song key
         resolveGroup(group)
       elseif #artistKeys == 1 then
-        -- Merge flat/Singles orphans into the one real artist
+        -- Fold flat/Singles orphans into the one real artist, but resolve
+        -- per-album so Discovery/Intro never deletes Homework/Intro.
         local a = artistKeys[1]
         for _, c in ipairs(weak) do byArtist[a][#byArtist[a] + 1] = c end
-        resolveGroup(byArtist[a])
+        local byAlbum, weakAlb = {}, {}
+        for _, c in ipairs(byArtist[a]) do
+          if isWeakAlbum(c.album) then
+            weakAlb[#weakAlb + 1] = c
+          else
+            local al = norm(c.album)
+            byAlbum[al] = byAlbum[al] or {}
+            byAlbum[al][#byAlbum[al] + 1] = c
+          end
+        end
+        local albumKeys = {}
+        for al in pairs(byAlbum) do albumKeys[#albumKeys + 1] = al end
+        if #albumKeys == 0 then
+          resolveGroup(byArtist[a])
+        elseif #albumKeys == 1 then
+          local al = albumKeys[1]
+          for _, c in ipairs(weakAlb) do byAlbum[al][#byAlbum[al] + 1] = c end
+          resolveGroup(byAlbum[al])
+        else
+          -- Multiple real albums: only fold a weak orphan into an album when
+          -- a same-size match exists there; never cross-delete album tracks.
+          for _, w in ipairs(weakAlb) do
+            local bestAl, bestScore = nil, -1
+            for _, al in ipairs(albumKeys) do
+              for _, c in ipairs(byAlbum[al]) do
+                if (w.size or 0) > 0 and w.size == c.size then
+                  local sc = audioKeepScore(c)
+                  if sc > bestScore then bestScore, bestAl = sc, al end
+                end
+              end
+            end
+            if bestAl then
+              byAlbum[bestAl][#byAlbum[bestAl] + 1] = w
+            end
+          end
+          for _, al in ipairs(albumKeys) do
+            resolveGroup(byAlbum[al])
+          end
+        end
       else
         -- Multiple real artists share a title — dedupe within each artist.
-        -- Fold each flat/orphan into the strongest Artist/Album (or paired) bucket.
+        -- Fold each flat/orphan into a strong Artist/Album only on same-size match.
         for _, w in ipairs(weak) do
           local bestA, bestScore = nil, -1
           for _, a in ipairs(artistKeys) do
             for _, c in ipairs(byArtist[a]) do
-              local sc = audioKeepScore(c)
-              if sc > bestScore then bestScore, bestA = sc, a end
+              if (w.size or 0) > 0 and w.size == c.size then
+                local sc = audioKeepScore(c)
+                if sc > bestScore then bestScore, bestA = sc, a end
+              end
             end
           end
           if bestA and bestScore >= 1000 then
@@ -892,7 +1004,44 @@ local function runMusic()
           end
         end
         for _, a in ipairs(artistKeys) do
-          resolveGroup(byArtist[a])
+          -- Per-album within artist
+          local byAlbum, weakAlb = {}, {}
+          for _, c in ipairs(byArtist[a]) do
+            if isWeakAlbum(c.album) then
+              weakAlb[#weakAlb + 1] = c
+            else
+              local al = norm(c.album)
+              byAlbum[al] = byAlbum[al] or {}
+              byAlbum[al][#byAlbum[al] + 1] = c
+            end
+          end
+          local albumKeys = {}
+          for al in pairs(byAlbum) do albumKeys[#albumKeys + 1] = al end
+          if #albumKeys <= 1 then
+            local bucket = byArtist[a]
+            if #albumKeys == 1 then
+              local al = albumKeys[1]
+              for _, c in ipairs(weakAlb) do byAlbum[al][#byAlbum[al] + 1] = c end
+              bucket = byAlbum[al]
+            end
+            resolveGroup(bucket)
+          else
+            for _, w in ipairs(weakAlb) do
+              local bestAl, bestScore = nil, -1
+              for _, al in ipairs(albumKeys) do
+                for _, c in ipairs(byAlbum[al]) do
+                  if (w.size or 0) > 0 and w.size == c.size then
+                    local sc = audioKeepScore(c)
+                    if sc > bestScore then bestScore, bestAl = sc, al end
+                  end
+                end
+              end
+              if bestAl then byAlbum[bestAl][#byAlbum[bestAl] + 1] = w end
+            end
+            for _, al in ipairs(albumKeys) do
+              resolveGroup(byAlbum[al])
+            end
+          end
         end
       end
     end
@@ -1783,13 +1932,19 @@ end
 ------------------------------------------------------------------ main
 print(modeTag() .. "sort-music — music + sfx + root + lyrics")
 if opts.dryRun then
-  print("Preview only (reports moves + merges + deletes). Re-run with --apply to write.")
+  print("Preview only (reports moves + merges + would-deletes). Re-run with --apply to write.")
+  if opts.dedupe then
+    print("Audio dupe preview ON (--dedupe): shows confirmed extras that would be deleted.")
+  else
+    print("Audio deletes OFF (default). Add --dedupe to preview/remove confirmed extras.")
+  end
 elseif opts.dedupe then
-  print("Audio dupe cleanup ON: keeps best .dfpwm+.lrc (prefer Artist/Album); deletes extras.")
-  print("Collision folders (Name 2) merge into Name. Root loose .dfpwm/.lrc → disks.")
-  print("Pass --safe or --no-dedupe to skip audio deletes.")
+  print("Audio dupe cleanup ON (--dedupe): keeps best .dfpwm+.lrc; deletes confirmed extras only.")
+  print("Never deletes sole copies or protected Artist/Album tracks without a kept same-size twin.")
+  print("Collision folders (Name 2) merge into Name only when Name exists.")
 else
-  print("Audio dupe cleanup OFF (--safe / --no-dedupe). Nest/Singles/root/SFX/lyrics only.")
+  print("Audio dupe cleanup OFF (default). Nest/Singles/root/SFX/lyrics only — albums survive.")
+  print("Pass --dedupe to delete confirmed audio extras. --safe / --no-dedupe keep deletes off.")
 end
 
 if opts.doSfx then runSfx() end
@@ -1802,7 +1957,7 @@ print("---")
 print(modeTag() .. "Done.")
 if opts.dryRun then
   print("Next: sort-music --apply")
-  print("  (or sort-music --apply --safe to tidy without deleting audio dupes)")
+  print("  (albums safe; add --dedupe only if you want confirmed audio extras removed)")
 else
   print("F5 / restart jukebox to rescan. DJ picks up /sfx on next flip.")
 end
