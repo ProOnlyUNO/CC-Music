@@ -5,7 +5,7 @@ CC Music Tools — Windows desktop GUI for CC:Tweaked jukebox prep.
 Developer: ProOnlyUNO
 
 Tabs:
-  Download  — YouTube playlist/album URL → select tracks → MP3 (yt-dlp)
+  Download  — search or paste YouTube playlist/song URL → select tracks → MP3 (yt-dlp)
   Convert   — MP3/WAV/… → .dfpwm (needs ffmpeg 5.1+)
   Lyrics    — LRCLIB public API → .lrc beside tracks + pack
   How to use / Commands
@@ -141,6 +141,7 @@ class App(tk.Tk):
         self._playlist_entries: list[download_core.PlaylistEntry] = []
         self._track_vars: list[tk.BooleanVar] = []
         self._playlist_title: str = ""
+        self._search_results: list[download_core.SearchResult] = []
 
         self._load_background_source()
         self._enable_glass_punchthrough()
@@ -175,9 +176,95 @@ class App(tk.Tk):
             u.wm_attributes("-toolwindow", True)
         except tk.TclError:
             pass
+        # Never steal keyboard focus from the chrome window.
+        try:
+            u.wm_attributes("-disabled", False)
+        except tk.TclError:
+            pass
         self._bg_canvas = tk.Canvas(u, highlightthickness=0, bd=0, bg="#000000")
         self._bg_canvas.pack(fill="both", expand=True)
         self._underlay = u
+        self._arm_underlay_click_guards()
+        self.after(80, self._win32_pin_underlay_below)
+
+    def _arm_underlay_click_guards(self) -> None:
+        """Clicks on transparent glass hit the underlay — never let it rise above chrome."""
+        if self._underlay is None:
+            return
+
+        def guard(_event: tk.Event | None = None) -> str:
+            self._reassert_chrome_stack()
+            return "break"
+
+        for widget in (self._underlay, self._bg_canvas):
+            for seq in (
+                "<Button-1>",
+                "<Button-2>",
+                "<Button-3>",
+                "<ButtonPress>",
+                "<ButtonRelease-1>",
+                "<FocusIn>",
+                "<Map>",
+            ):
+                widget.bind(seq, guard, add="+")
+
+    def _reassert_chrome_stack(self) -> None:
+        """Keep Matrix rain decorative and below the interactive chrome."""
+        if self._underlay is None:
+            return
+        try:
+            self._underlay.lower(self)
+            self.lift()
+            # Restore keyboard focus to chrome without stealing from other apps mid-type
+            # only when the underlay somehow became the active window.
+            try:
+                if self.focus_displayof() is None:
+                    self.focus_force()
+            except tk.TclError:
+                self.focus_force()
+        except tk.TclError:
+            pass
+        self._win32_pin_underlay_below()
+
+    def _win32_pin_underlay_below(self) -> None:
+        """Win32: pin underlay directly under main without activating it."""
+        if sys.platform != "win32" or self._underlay is None:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            hwnd_main = wintypes.HWND(int(self.winfo_id()))
+            hwnd_under = wintypes.HWND(int(self._underlay.winfo_id()))
+            # Tk winfo_id is often a child; walk to top-level HWNDs.
+            GA_ROOT = 2
+            hwnd_main = user32.GetAncestor(hwnd_main, GA_ROOT) or hwnd_main
+            hwnd_under = user32.GetAncestor(hwnd_under, GA_ROOT) or hwnd_under
+
+            GWL_EXSTYLE = -20
+            WS_EX_NOACTIVATE = 0x08000000
+            WS_EX_TOOLWINDOW = 0x00000080
+            style = user32.GetWindowLongW(hwnd_under, GWL_EXSTYLE)
+            user32.SetWindowLongW(
+                hwnd_under, GWL_EXSTYLE, style | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+            )
+
+            SWP_NOSIZE = 0x0001
+            SWP_NOMOVE = 0x0002
+            SWP_NOACTIVATE = 0x0010
+            # hwndInsertAfter = main → underlay is placed behind main.
+            user32.SetWindowPos(
+                hwnd_under,
+                hwnd_main,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def _sync_underlay(self) -> None:
         if self._underlay is None:
@@ -199,6 +286,7 @@ class App(tk.Tk):
             self._underlay.lower(self)
         except tk.TclError:
             pass
+        self._win32_pin_underlay_below()
         if self._bg_size != (w, h):
             self._bg_size = (w, h)
             photo = self._compose_background(w, h)
@@ -215,6 +303,7 @@ class App(tk.Tk):
 
     def _on_main_map(self, _event: tk.Event | None = None) -> None:
         self.after(20, self._sync_underlay)
+        self.after(40, self._reassert_chrome_stack)
 
     def _on_main_unmap(self, _event: tk.Event | None = None) -> None:
         if self._underlay is not None:
@@ -594,12 +683,69 @@ class App(tk.Tk):
 
     def _build_download(self, parent: ttk.Frame) -> None:
         self.dl_url = tk.StringVar()
+        self.dl_search = tk.StringVar()
+        self.dl_search_songs = tk.BooleanVar(value=True)
+        self.dl_search_playlists = tk.BooleanVar(value=True)
         self.dl_out = tk.StringVar(value=str(DEFAULT_DOWNLOAD_OUT))
-        self.dl_status = tk.StringVar(value="Paste a YouTube playlist or album URL, then Fetch titles.")
+        self.dl_status = tk.StringVar(
+            value="Search by name or paste a YouTube URL, then Fetch titles."
+        )
+
+        search_frame = ttk.Frame(parent, style="Card.TFrame")
+        search_frame.pack(fill="x", pady=(0, 4))
+        ttk.Label(search_frame, text="Search YouTube (songs & playlists)").pack(anchor="w")
+        search_row = ttk.Frame(search_frame, style="Card.TFrame")
+        search_row.pack(fill="x")
+        search_entry = ttk.Entry(search_row, textvariable=self.dl_search)
+        search_entry.pack(side="left", fill="x", expand=True)
+        search_entry.bind("<Return>", lambda _e: self._start_youtube_search())
+        ttk.Button(search_row, text="Search", command=self._start_youtube_search, width=10).pack(
+            side="left", padx=(6, 0)
+        )
+        opts = ttk.Frame(search_frame, style="Card.TFrame")
+        opts.pack(fill="x", pady=(4, 0))
+        ttk.Checkbutton(opts, text="Songs", variable=self.dl_search_songs).pack(side="left")
+        ttk.Checkbutton(opts, text="Playlists", variable=self.dl_search_playlists).pack(
+            side="left", padx=(10, 0)
+        )
+
+        results_wrap = ttk.LabelFrame(parent, text="Search results — click to load", padding=6)
+        results_wrap.pack(fill="x", pady=(6, 0))
+        results_row = ttk.Frame(results_wrap, style="Card.TFrame")
+        results_row.pack(fill="x")
+        self._search_list = tk.Listbox(
+            results_row,
+            height=5,
+            activestyle="dotbox",
+            selectmode="browse",
+            exportselection=False,
+            bg=COLORS["entry_bg"],
+            fg=COLORS["entry_fg"],
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+            selectbackground=COLORS["accent_soft"],
+            selectforeground=COLORS["text"],
+            relief="flat",
+            font=("Segoe UI", 9),
+        )
+        search_scroll = ttk.Scrollbar(results_row, orient="vertical", command=self._search_list.yview)
+        self._search_list.configure(yscrollcommand=search_scroll.set)
+        self._search_list.pack(side="left", fill="x", expand=True)
+        search_scroll.pack(side="right", fill="y")
+        self._search_list.bind("<Double-Button-1>", self._on_search_result_activate)
+        self._search_list.bind("<Return>", self._on_search_result_activate)
+        use_row = ttk.Frame(results_wrap, style="Card.TFrame")
+        use_row.pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            use_row,
+            text="Use selected → Fetch titles",
+            command=self._on_search_result_activate,
+            width=24,
+        ).pack(side="left")
 
         url_frame = ttk.Frame(parent, style="Card.TFrame")
-        url_frame.pack(fill="x", pady=(0, 4))
-        ttk.Label(url_frame, text="YouTube playlist / album URL").pack(anchor="w")
+        url_frame.pack(fill="x", pady=(8, 4))
+        ttk.Label(url_frame, text="Or paste YouTube playlist / song URL").pack(anchor="w")
         url_row = ttk.Frame(url_frame, style="Card.TFrame")
         url_row.pack(fill="x")
         ttk.Entry(url_row, textvariable=self.dl_url).pack(side="left", fill="x", expand=True)
@@ -619,7 +765,7 @@ class App(tk.Tk):
             highlightthickness=1,
             highlightbackground=COLORS["border"],
             bg=TRANSPARENT_KEY,
-            height=180,
+            height=140,
         )
         dl_scroll = ttk.Scrollbar(canvas_row, orient="vertical", command=self._dl_canvas.yview)
         self._dl_canvas.configure(yscrollcommand=dl_scroll.set)
@@ -650,8 +796,8 @@ class App(tk.Tk):
         ttk.Label(
             parent,
             text=(
-                "Flow: download MP3s → auto-fetch LRCLIB lyrics (artist/title kept in tags) → "
-                "organize into Artist/Album → Convert. Needs yt-dlp + ffmpeg.\n"
+                "Flow: search or paste URL → fetch titles → download MP3s → LRCLIB lyrics → "
+                "Artist/Album → Convert. Needs yt-dlp + ffmpeg.\n"
                 f"Alternate (browser): {YTMP3_ALT_URL}"
             ),
             wraplength=740,
@@ -842,8 +988,8 @@ Open setup/ next to this app (START_HERE.txt) for which .lua goes on which compu
    • Protocol: pocket_mp3 · SYNC → tap a song
 
 4) Desktop tools flow (this app)
-   a. Download (optional) — paste a YouTube playlist/album URL → Fetch titles
-      → check tracks → Download selected MP3s
+   a. Download (optional) — search songs/playlists by name, or paste a URL
+      → click a result (or paste) → Fetch titles → check tracks → Download
       → lyrics auto-fetch (LRCLIB) while artist/title are still known
       → prompt for library root → organize Artist/Album/Song.mp3 (+ .lrc)
       → Send folder → Convert
@@ -1002,7 +1148,7 @@ You’re set — enjoy the music.
         def apply() -> None:
             self.prog_detail.set(detail)
             # Overall bar
-            if phase in ("overall", "fetch", "organize", "convert", "lyrics_batch"):
+            if phase in ("overall", "fetch", "search", "organize", "convert", "lyrics_batch"):
                 if frac is None:
                     if str(self.prog_overall["mode"]) != "indeterminate":
                         self.prog_overall.configure(mode="indeterminate")
@@ -1013,7 +1159,7 @@ You’re set — enjoy the music.
                         self.prog_overall.configure(mode="determinate")
                     self.prog_overall_var.set(max(0.0, min(100.0, frac * 100.0)))
             # Current / track bar
-            if phase in ("track", "lyrics", "fetch"):
+            if phase in ("track", "lyrics", "fetch", "search"):
                 if frac is None:
                     if str(self.prog_track["mode"]) != "indeterminate":
                         self.prog_track.configure(mode="indeterminate")
@@ -1070,13 +1216,100 @@ You’re set — enjoy the music.
             subprocess.Popen(["xdg-open", path])
 
     # -------------------------------------------------------------- workers
+    def _populate_search_results(self, results: list[download_core.SearchResult]) -> None:
+        self._search_results = list(results)
+        self._search_list.delete(0, "end")
+        for r in results:
+            kind = "Playlist" if r.kind == "playlist" else "Song"
+            dur = (
+                f"  ({download_core.format_duration(r.duration)})"
+                if r.kind == "song" and r.duration
+                else ""
+            )
+            who = f"  — {r.uploader}" if r.uploader else ""
+            self._search_list.insert("end", f"[{kind}]  {r.title}{who}{dur}")
+
+    def _selected_search_result(self) -> download_core.SearchResult | None:
+        sel = self._search_list.curselection()
+        if not sel:
+            return None
+        idx = int(sel[0])
+        if idx < 0 or idx >= len(self._search_results):
+            return None
+        return self._search_results[idx]
+
+    def _apply_search_result(self, result: download_core.SearchResult) -> None:
+        self.dl_url.set(result.url)
+        kind = "playlist" if result.kind == "playlist" else "song"
+        self.dl_status.set(f"Loaded {kind} URL — fetching titles…")
+        self._start_fetch_playlist()
+
+    def _on_search_result_activate(self, _event: tk.Event | None = None) -> None:
+        result = self._selected_search_result()
+        if result is None:
+            messagebox.showinfo(APP_TITLE, "Select a search result first.")
+            return
+        self._apply_search_result(result)
+
+    def _start_youtube_search(self) -> None:
+        if self._busy:
+            messagebox.showwarning(APP_TITLE, "A job is already running.")
+            return
+        query = self.dl_search.get().strip()
+        if not query:
+            messagebox.showerror(APP_TITLE, "Type a song or playlist name to search.")
+            return
+        include_songs = bool(self.dl_search_songs.get())
+        include_playlists = bool(self.dl_search_playlists.get())
+        if not include_songs and not include_playlists:
+            messagebox.showerror(APP_TITLE, "Enable Songs and/or Playlists to search.")
+            return
+
+        self._cancel = False
+        self._set_busy(True)
+        self._append_log("--- Download: YouTube search ---")
+        self.dl_status.set(f"Searching YouTube for “{query}”…")
+        self._ui_progress("search", None, f"Searching YouTube for “{query}”…")
+
+        def work() -> None:
+            try:
+                results = download_core.search_youtube(
+                    query,
+                    limit=8,
+                    include_songs=include_songs,
+                    include_playlists=include_playlists,
+                    log=self._ui_log,
+                    progress=self._ui_progress,
+                )
+
+                def apply() -> None:
+                    self._populate_search_results(results)
+                    self.dl_status.set(f"{len(results)} search result(s) — click one, then Fetch titles.")
+                    self._ui_progress("search", 1.0, f"Found {len(results)} result(s)")
+                    self._set_busy(False)
+
+                self.after(0, apply)
+            except Exception as e:  # noqa: BLE001
+                self._ui_log(f"ERROR: {e}")
+
+                def fail() -> None:
+                    self.dl_status.set("Search failed — see log.")
+                    self._set_busy(False)
+
+                self.after(0, fail)
+
+        threading.Thread(target=work, daemon=True).start()
+
     def _start_fetch_playlist(self) -> None:
         if self._busy:
             messagebox.showwarning(APP_TITLE, "A job is already running.")
             return
         url = self.dl_url.get().strip()
         if not url:
-            messagebox.showerror(APP_TITLE, "Paste a YouTube playlist or album URL first.")
+            messagebox.showerror(
+                APP_TITLE,
+                "Search and select a result, or paste a YouTube playlist/song URL first.",
+            )
             return
 
         self._cancel = False

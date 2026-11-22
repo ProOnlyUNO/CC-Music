@@ -51,6 +51,17 @@ class DownloadedTrack:
     lrc: Path | None = None
 
 
+@dataclass
+class SearchResult:
+    kind: str  # "song" | "playlist"
+    title: str
+    url: str
+    id: str = ""
+    uploader: str | None = None
+    duration: int | None = None
+    channel: str | None = None
+
+
 def _import_yt_dlp():
     try:
         import yt_dlp  # type: ignore
@@ -356,6 +367,146 @@ def format_duration(seconds: int | None) -> str:
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
+
+
+def _search_entries_from_info(data: dict[str, Any], *, kind: str) -> list[SearchResult]:
+    raw = data.get("entries")
+    if raw is None:
+        raw = [data] if data.get("id") else []
+    elif not isinstance(raw, list):
+        raw = list(raw)
+    out: list[SearchResult] = []
+    for item in raw:
+        if not item or not isinstance(item, dict):
+            continue
+        vid = str(item.get("id") or "").strip()
+        title = str(item.get("title") or vid or "Untitled").strip()
+        if not vid or title in ("[Deleted video]", "[Private video]"):
+            continue
+        ie_key = str(item.get("ie_key") or item.get("_type") or "").lower()
+        item_kind = kind
+        if "playlist" in ie_key:
+            item_kind = "playlist"
+        url = str(item.get("url") or item.get("webpage_url") or "").strip()
+        if not url.startswith("http"):
+            if item_kind == "playlist":
+                url = f"https://www.youtube.com/playlist?list={vid}"
+            else:
+                url = f"https://www.youtube.com/watch?v={vid}"
+        duration = item.get("duration")
+        try:
+            duration_i = int(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration_i = None
+        uploader = item.get("uploader") or item.get("channel") or item.get("creator")
+        out.append(
+            SearchResult(
+                kind=item_kind,
+                title=title,
+                url=url,
+                id=vid,
+                uploader=str(uploader).strip() if uploader else None,
+                duration=duration_i,
+                channel=str(item.get("channel") or "").strip() or None,
+            )
+        )
+    return out
+
+
+def search_youtube(
+    query: str,
+    *,
+    limit: int = 8,
+    include_songs: bool = True,
+    include_playlists: bool = True,
+    log: LogFn | None = None,
+    progress: ProgressFn | None = None,
+) -> list[SearchResult]:
+    """Search YouTube for songs and/or playlists via yt-dlp.
+
+    Songs use ``ytsearchN:query``. Playlists use the YouTube results URL with
+    the playlist filter (``sp=EgIQAw%3D%3D``).
+    """
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("Type a search query first.")
+    if not include_songs and not include_playlists:
+        raise ValueError("Enable songs and/or playlists to search.")
+
+    ok, msg = check_yt_dlp()
+    if not ok:
+        raise RuntimeError(msg)
+
+    limit = max(1, min(25, int(limit)))
+    if progress:
+        progress("search", None, f"Searching YouTube for “{q}”…")
+    if log:
+        log(f"YouTube search via {msg}: {q!r} (limit {limit})")
+
+    results: list[SearchResult] = []
+    yt_dlp = _import_yt_dlp()
+    exe = None if yt_dlp is not None else find_yt_dlp_exe()
+
+    if include_songs:
+        song_url = f"ytsearch{limit}:{q}"
+        if progress:
+            progress("search", None, "Searching songs…")
+        if yt_dlp is not None:
+            data = _extract_flat_api(yt_dlp, song_url, log)
+        else:
+            assert exe
+            data = _extract_flat_exe(exe, song_url)
+        songs = _search_entries_from_info(data, kind="song")
+        results.extend(songs)
+        if log:
+            log(f"  songs: {len(songs)}")
+
+    if include_playlists:
+        from urllib.parse import quote_plus
+
+        # YouTube search results filtered to Playlists
+        pl_url = (
+            "https://www.youtube.com/results?search_query="
+            + quote_plus(q)
+            + "&sp=EgIQAw%3D%3D"
+        )
+        if progress:
+            progress("search", None, "Searching playlists…")
+        try:
+            if yt_dlp is not None:
+                data = _extract_flat_api(yt_dlp, pl_url, log)
+            else:
+                assert exe
+                data = _extract_flat_exe(exe, pl_url)
+            playlists = _search_entries_from_info(data, kind="playlist")[:limit]
+            # Dedupe against songs by id
+            seen = {r.id for r in results}
+            added = 0
+            for p in playlists:
+                if p.id in seen:
+                    continue
+                # Force playlist URLs when id looks like a list id
+                if not p.url.startswith("http") or "list=" not in p.url:
+                    p.url = f"https://www.youtube.com/playlist?list={p.id}"
+                p.kind = "playlist"
+                results.append(p)
+                seen.add(p.id)
+                added += 1
+            if log:
+                log(f"  playlists: {added}")
+        except Exception as e:  # noqa: BLE001
+            if log:
+                log(f"  playlist search warn: {e}")
+
+    # Prefer playlists first, then songs (stable within each group)
+    results.sort(key=lambda r: (0 if r.kind == "playlist" else 1, r.title.lower()))
+    if progress:
+        progress("search", 1.0, f"Found {len(results)} result(s)")
+    if log:
+        log(f"Search done — {len(results)} result(s).")
+    if not results:
+        raise RuntimeError(f"No YouTube results for “{q}”. Try another query.")
+    return results
 
 
 def entry_meta(entry: PlaylistEntry, playlist_title: str | None = None) -> TrackMeta:
