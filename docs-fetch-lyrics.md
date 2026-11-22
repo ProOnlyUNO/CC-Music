@@ -50,8 +50,8 @@ Use `sort-music` only for `.lrc` already sitting on the computer/disks (flat lef
 4. Preview, then apply lyrics only (safe; no audio deletes):
 
 ```text
-sort-music                         -- preview (dry-run, default — no writes)
-sort-music --apply --lyrics-only   -- place every matched .lrc beside its .dfpwm
+sort-music                         -- preview (dry-run, default — no writes; reports merges/deletes)
+sort-music --apply --lyrics-only   -- place every matched .lrc beside its .dfpwm (+ root cleanup)
 lyrics-status                      -- optional: count with/missing .lrc after sort
 ```
 
@@ -79,7 +79,8 @@ It **prefers copying beside** that song’s `.dfpwm` on the song’s disk, then 
 | Step | Action |
 |------|--------|
 | SFX | Creates `/sfx`, moves loose root `SFX*.dfpwm` into it |
-| Music | `Artist - Album` → `Artist/Album`; bare tracks → `Singles/`. Audio **dupe cleanup ON** (keep best `.dfpwm`+`.lrc`, prefer Artist/Album); `--safe` / `--no-dedupe` skips deletes |
+| Music | `Artist - Album` → `Artist/Album`; `Singles - Title` → Singles album + Title; `Name 2` collisions merge into `Name`; bare tracks → `Singles/`. Audio **dupe cleanup ON** (keep best `.dfpwm`+`.lrc`, prefer Artist/Album); `--safe` / `--no-dedupe` skips deletes |
+| Root | Loose computer-root `.dfpwm` + `.lrc` → disks; leftovers cleared. Keeps `*.lua` / `startup` / library dirs |
 | Lyrics | Recursive `.lrc` find + match; place beside `.dfpwm`; mirror `/lyrics`; dedupe extra `.lrc`; clear consumed flat drops |
 
 Zip files: skipped unless an `unzip` program already exists on the computer (CC has no built-in unzip).

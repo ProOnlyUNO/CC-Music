@@ -78,14 +78,16 @@ Also accepts **`.lrc`** drops: matches to a library `.dfpwm` (basename / normali
 
 `sort-music.lua` is the single in-game sorter (bulk tidy / orphan lyrics / dupe cleanup):
 
-- Music: `Artist - Album` → `Artist/Album`; loose tracks → `Singles/`
+- Music: `Artist - Album` → `Artist/Album`; loose tracks → `Singles/`; **`Singles - Title`** → `Various/Singles` + song Title (not artist=Singles)
+- Collisions: folders/files named `Name 2` / `Name_2` / `Name (2)` merge into `Name` (they appear when a nest target already existed)
 - SFX: create `/sfx`, move loose root `SFX*.dfpwm` into it
+- **Root cleanup:** loose computer-root `.dfpwm` + `.lrc` → match/move onto disks; leftovers cleared so `ls` isn’t a dump. Never deletes `*.lua`, `startup`, or library dirs (`music`/`sfx`/`lyrics`/`disk*`)
 - Lyrics: match **flat `.lrc` drops** (computer/disk root — CC can’t drop folders) or an optional pack tree; place beside `.dfpwm`; mirror `/lyrics` with multi-disk spill; **dedupe** extra `.lrc`
-- Audio **dupe cleanup is ON by default** with `--apply`: scans every `diskN` / `music` / Artist/Album spot, keeps the best `.dfpwm`+`.lrc` pair (prefer Artist/Album), deletes weaker extras. Dry-run only reports. Use `--safe` / `--no-dedupe` to skip audio deletes.
+- Audio **dupe cleanup is ON by default** with `--apply`: scans every `diskN` / `music` / Artist/Album spot, keeps the best `.dfpwm`+`.lrc` pair (prefer Artist/Album), deletes weaker extras + empty collision folders. Dry-run only reports. Use `--safe` / `--no-dedupe` to skip audio deletes.
 
 ```text
-sort-music                  -- preview (no writes; reports moves + dupes)
-sort-music --apply          -- nest + Singles + SFX + lyrics + dupe cleanup
+sort-music                  -- preview (no writes; reports moves + merges + deletes)
+sort-music --apply          -- nest + Singles + root + SFX + lyrics + dupe cleanup
 sort-music --apply --safe   -- tidy without deleting audio dupes
 ```
 
