@@ -22,12 +22,15 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import build_info
 import convert_core
 import download_core
 import lyrics_core
+import update_check
 
 APP_TITLE = "CC Music Tools"
-APP_VERSION = "1.0.0"
+APP_VERSION = build_info.APP_VERSION
+BUILD_STAMP = build_info.BUILD_STAMP
 DEVELOPER = "ProOnlyUNO"
 
 
@@ -136,6 +139,8 @@ class App(tk.Tk):
         self._build()
         self.after(100, self._drain_log)
         self.bind("<Configure>", self._on_resize)
+        # Quiet background update check — never blocks first paint.
+        self.after(800, self._start_update_check)
 
     def _load_background_source(self) -> None:
         path = find_asset("background.jpg", "background.png")
@@ -358,7 +363,7 @@ class App(tk.Tk):
             header,
             text=(
                 f"Download → lyrics → Artist/Album → Convert for your CC:Tweaked jukebox.  "
-                f"Developer: {DEVELOPER}  ·  v{APP_VERSION}"
+                f"Developer: {DEVELOPER}  ·  v{APP_VERSION}  ·  build {BUILD_STAMP}"
             ),
             style="Subhead.TLabel",
         ).pack(anchor="w", pady=(2, 0))
@@ -1059,6 +1064,99 @@ You’re set — enjoy the music.
                 self.after(0, lambda: self._set_busy(False))
 
         threading.Thread(target=work, daemon=True).start()
+
+    # -------------------------------------------------------------- updates
+    def _start_update_check(self) -> None:
+        def work() -> None:
+            try:
+                info = update_check.check_for_update(
+                    app_dir=APP_DIR,
+                    log=None,  # keep quiet unless we prompt
+                )
+            except Exception:  # noqa: BLE001
+                return
+            if info is None:
+                return
+            self.after(0, lambda: self._offer_update(info))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ask_update_dialog(self, info: update_check.UpdateInfo) -> bool | None:
+        """Return True=Update, False=Later, None=closed."""
+        result: dict[str, bool | None] = {"value": None}
+        dlg = tk.Toplevel(self)
+        dlg.title(APP_TITLE)
+        dlg.transient(self)
+        dlg.configure(bg=COLORS["panel"])
+        dlg.resizable(False, False)
+        apply_window_icon(dlg)
+        frame = ttk.Frame(dlg, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Update available", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=(
+                f"Installed:  v{APP_VERSION}  (build {info.local_build})\n"
+                f"Available:  {info.release_tag}  (build {info.remote_build})\n\n"
+                "Update downloads Setup.exe and runs the installer.\n"
+                "Later skips this build until a newer one appears."
+            ),
+            style="Glass.TLabel",
+            justify="left",
+        ).pack(anchor="w", pady=(10, 14))
+        btns = ttk.Frame(frame)
+        btns.pack(fill="x")
+
+        def choose(update: bool) -> None:
+            result["value"] = update
+            dlg.destroy()
+
+        ttk.Button(btns, text="Later", command=lambda: choose(False)).pack(side="right")
+        ttk.Button(
+            btns, text="Update", style="Accent.TButton", command=lambda: choose(True)
+        ).pack(side="right", padx=(0, 8))
+        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.grab_set()
+        dlg.wait_window()
+        return result["value"]
+
+    def _offer_update(self, info: update_check.UpdateInfo) -> None:
+        choice = self._ask_update_dialog(info)
+        if choice is None:
+            return
+        if choice:
+            self._append_log(
+                f"--- Update: {info.local_build} → {info.remote_build} ---"
+            )
+            self.status.configure(text="Downloading update…")
+
+            def work() -> None:
+                ok = update_check.download_and_run_update(
+                    info, log=self._ui_log
+                )
+
+                def done() -> None:
+                    if ok:
+                        self.status.configure(
+                            text="Installer started — finish Setup, then reopen the app."
+                        )
+                        if messagebox.askyesno(
+                            APP_TITLE,
+                            "Setup.exe is running.\n\n"
+                            "Close CC Music Tools now so the installer can replace files?",
+                        ):
+                            self.destroy()
+                    else:
+                        self.status.configure(
+                            text="Update download failed — opened release page."
+                        )
+
+                self.after(0, done)
+
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            update_check.save_skipped_build(APP_DIR, info.remote_build)
+            self.status.configure(text=f"Update skipped (build {info.remote_build}).")
 
 
 def main() -> int:

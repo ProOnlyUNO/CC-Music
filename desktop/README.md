@@ -9,6 +9,8 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
 4. **How to use** / **Commands** — friendly in-app guides
 
+On launch the app quietly checks GitHub Release **v1.0.0** for a newer **build stamp** (not just the version tag). If `build-info.json` on the release is newer than the embedded stamp, you get **Update** / **Later**.
+
 ## Quick start (Setup.exe)
 
 1. Double-click **`Setup.exe`**.
@@ -95,8 +97,9 @@ build_exe.bat
 build_setup.bat
 ```
 
-- `build_exe.bat` → `dist\CC_Music_Tools.exe`
+- `build_exe.bat` stamps `BUILD_STAMP` + writes `build-info.json`, then → `dist\CC_Music_Tools.exe`
 - `build_setup.bat` → **`Setup.exe`** (embeds exe + assets + README + **setup/**)
+- Refresh GitHub **v1.0.0** with both **`Setup.exe`** and **`build-info.json`** (same stamp) so in-app update checks work.
 
 ## Files in this folder
 
