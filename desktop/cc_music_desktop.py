@@ -1039,10 +1039,10 @@ Run once (no startup)
   pocket                 ← runs pocket.lua on the Pocket Computer
 
 Music library helpers (main PC)
-  sort-music                        preview tidy + dupe report (no writes)
-  sort-music --apply                nest + SFX + lyrics + delete audio dupes
+  sort-music                        preview tidy + merges/deletes (no writes)
+  sort-music --apply                nest + root + SFX + lyrics + delete audio dupes
   sort-music --apply --safe         tidy without deleting audio dupes
-  sort-music --apply --lyrics-only  place orphan .lrc beside songs
+  sort-music --apply --lyrics-only  place orphan .lrc beside songs (+ root cleanup)
   lyrics-status                     count tracks with / without .lrc
   delete-music                      pick Artist → Album → Song (or DELETE ALBUM)
   delete-music --dry-run            preview deletes only

@@ -3,10 +3,15 @@
 
   Does all of:
     1) Music:  Artist - Album → Artist/Album ; bare Artist/*.dfpwm → Artist/Singles
+               "Singles - Title" → Album=Singles + song Title (not artist Singles)
+               "Name 2" / "Name_2" / "Name (2)" treated as collision dupes of Name
                + cross-disk audio dedupe (ON with --apply; dry-run reports only)
                  Keep best .dfpwm+.lrc pair; prefer Artist/Album path; delete extras
+                 + prune leftover empty " 2" folders after merge
     2) SFX:    create /sfx ; move loose root SFX*.dfpwm into it (not audio-deduped)
-    3) Lyrics: match .lrc to library tracks, place beside songs, mirror /lyrics
+    3) Root:   loose root .dfpwm + .lrc → match/move onto disks; clear leftovers
+               Never deletes scripts (*.lua), startup, or library/system dirs
+    4) Lyrics: match .lrc to library tracks, place beside songs, mirror /lyrics
                (spills across disks when full). Sources:
                  • recursive: every .lrc under computer + disk + diskN
                    (flat drops, nested leftovers, pack trees)
@@ -16,18 +21,22 @@
 
   Usage:
       sort-music                  -- dry-run preview (report only; no writes)
-      sort-music --apply          -- nest + Singles + SFX + lyrics + dupe cleanup
-      sort-music --apply --safe   -- nest/Singles/SFX/lyrics, never delete audio
+      sort-music --apply          -- nest + Singles + root + SFX + lyrics + dupe cleanup
+      sort-music --apply --safe   -- nest/Singles/root/SFX/lyrics, never delete audio
       sort-music --apply --no-dedupe  -- same as --safe for audio deletes
       sort-music --apply --lyrics-only
       sort-music --apply --no-lyrics
       sort-music --apply --no-mirror
+      sort-music --apply --no-root
 
   Drop many .lrc files onto the computer or a disk root, then:
       sort-music --apply
 
   Flags: --apply  --dry-run  --dedupe  --no-dedupe  --safe  --lyrics-only
-         --no-lyrics  --no-music  --no-sfx  --no-mirror  --help
+         --no-lyrics  --no-music  --no-sfx  --no-root  --no-mirror  --help
+
+  Why "Name 2" appears: when a move/nest target already existed, the sorter (or an
+  older copy) coined a collision name instead of merging into the existing folder.
 ]]
 
 local RESERVE = 4096 -- bytes kept free per mount (Importer-style)
@@ -39,6 +48,7 @@ local opts = {
   doMusic = true,
   doSfx = true,
   doLyrics = true,
+  doRoot = true, -- clear loose .dfpwm/.lrc from computer root onto disks
   mirror = true,
   dedupe = true, -- default ON; dry-run still only reports. Use --safe / --no-dedupe to skip.
   pack = nil,
@@ -60,19 +70,24 @@ for _, a in ipairs(rawArgs) do
     opts.doLyrics = true
     opts.doMusic = false
     opts.doSfx = false
+    opts.doRoot = true -- still clear loose root .lrc/.dfpwm
   elseif lower == "--no-lyrics" then
     opts.doLyrics = false
   elseif lower == "--no-music" then
     opts.doMusic = false
   elseif lower == "--no-sfx" then
     opts.doSfx = false
+  elseif lower == "--no-root" then
+    opts.doRoot = false
   elseif lower == "--no-mirror" then
     opts.mirror = false
   elseif lower == "--help" or lower == "-h" then
     print("sort-music [--apply] [packDir] [--lyrics-only] [--no-lyrics] [--no-mirror]")
     print("  Dry-run by default (no writes). --apply writes.")
-    print("  Music nest + Singles + SFX + lyrics + audio dupe cleanup (default).")
+    print("  Music nest + Singles + root cleanup + SFX + lyrics + audio dupe cleanup.")
+    print("  Collision folders (Name 2 / Name_2) merge into Name; Singles - Title → Singles/Title.")
     print("  Dupes: keep best .dfpwm+.lrc pair; prefer Artist/Album; delete extras.")
+    print("  Root: move loose .dfpwm/.lrc onto disks; never deletes *.lua / startup.")
     print("  --safe / --no-dedupe skips audio deletes. --dedupe forces them on.")
     print("  Recursively finds .lrc; matches basename/tags/fuzzy; places beside .dfpwm.")
     print("  Drop flat .lrc on computer/disk root, then: sort-music --apply --lyrics-only")
@@ -130,6 +145,27 @@ local function loose(s)
   return s:gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+-- Collision suffixes from name clashes when a destination already existed:
+--   "Palaces 2", "Palaces_2", "Palaces (2)" → "Palaces"
+local function stripCollisionSuffix(name)
+  local s = tostring(name or "")
+  local base, ext = s:match("^(.*)(%.[^%.]+)$")
+  if not base then base, ext = s, "" end
+  local cleaned = base
+    :gsub("%s*%(%d+%)$", "")
+    :gsub("_%d+$", "")
+    :gsub("%s+%d+$", "")
+  cleaned = cleaned:gsub("%s+$", "")
+  if cleaned == "" then cleaned = base end
+  return cleaned .. ext, cleaned ~= base
+end
+
+local function canonicalStem(name)
+  local stem = tostring(name or ""):gsub("%.[Ll][Rr][Cc]$", ""):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local cleaned = select(1, stripCollisionSuffix(stem))
+  return cleaned
+end
+
 local function stripTrackNo(name)
   local n = tostring(name or "")
   local stripped = n:gsub("^%s*%d+%s*[%.%-%)]+%s*", ""):gsub("^%s*%d+%s+", "")
@@ -138,6 +174,7 @@ end
 
 local function songKeys(name)
   local base = tostring(name or ""):gsub("%.[Ll][Rr][Cc]$", ""):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local canon = canonicalStem(base)
   local keys, seen = {}, {}
   local function add(v)
     local k = norm(v)
@@ -152,30 +189,60 @@ local function songKeys(name)
     end
   end
   add(base)
+  add(canon)
   add(stripTrackNo(base))
+  add(stripTrackNo(canon))
   add(base:gsub("%s*%b()", ""))
+  add(canon:gsub("%s*%b()", ""))
   add(stripTrackNo(base:gsub("%s*%b()", "")))
+  add(stripTrackNo(canon:gsub("%s*%b()", "")))
   -- "Artist - Title" / "Artist - Album - Title" → also index title-only
-  local a, b, c = base:match("^(.-) %- (.-) %- (.+)$")
-  if a and b and c then
-    add(c)
-    add(stripTrackNo(c))
-  else
-    local a2, t2 = base:match("^(.-) %- (.+)$")
-    if a2 and t2 then
-      add(t2)
-      add(stripTrackNo(t2))
+  local function addTitleParts(src)
+    local a, b, c = src:match("^(.-) %- (.-) %- (.+)$")
+    if a and b and c then
+      add(c)
+      add(stripTrackNo(c))
+      add(canonicalStem(c))
+    else
+      local a2, t2 = src:match("^(.-) %- (.+)$")
+      if a2 and t2 then
+        add(t2)
+        add(stripTrackNo(t2))
+        add(canonicalStem(t2))
+      end
     end
   end
+  addTitleParts(base)
+  if canon ~= base then addTitleParts(canon) end
   return keys
 end
 
+-- Returns artist, album, titleHint
+-- "Daft Punk - Discovery" → artist, album
+-- "Singles - Palaces" / "Singles - Palaces 2" → nil artist, album=Singles, titleHint=Palaces
+-- (weak left side means album Singles + song title, not artist=Singles)
 local function parseArtistAlbum(folderName)
-  local artist, album = folderName:match("^(.-) %- (.+)$")
-  if artist and album and artist ~= "" and album ~= "" then
-    return artist, album
+  local cleaned = select(1, stripCollisionSuffix(folderName))
+  local artist, album = cleaned:match("^(.-) %- (.+)$")
+  if not (artist and album and artist ~= "" and album ~= "") then
+    return nil, nil, nil
   end
-  return nil, nil
+  album = select(1, stripCollisionSuffix(album))
+  local aNorm = norm(artist)
+  if aNorm == "singles" or aNorm == "various" or aNorm == "unknown" then
+    return nil, "Singles", album -- titleHint = album side (song name)
+  end
+  return artist, album, nil
+end
+
+local function isWeakArtist(name)
+  local n = norm(name)
+  return n == "" or n == "singles" or n == "various" or n == "unknown"
+end
+
+local function isWeakAlbum(name)
+  local n = norm(name)
+  return n == "" or n == "singles" or n == "unknown"
 end
 
 local function freeSpace(mount)
@@ -214,6 +281,7 @@ local function uniqueName(dir, name)
   local cand = name
   local n = 2
   while fs.exists(fs.combine(dir, cand)) do
+    -- Underscore form only for non-audio clashes; audio merges instead of "Name 2"
     cand = string.format("%s_%d%s", base, n, ext)
     n = n + 1
   end
@@ -226,14 +294,33 @@ local function deletePath(path)
   return ok, err
 end
 
+-- Forward-declared: defined with music helpers; used by movePath at runtime.
+local hasBesideLrc
+
 local function movePath(src, dst)
   if opts.dryRun then return true, nil, dst end
   if src == dst then return true, nil, dst end
   local parent = fs.getDir(dst)
   if parent and parent ~= "" then ensureDir(parent) end
   if fs.exists(dst) then
-    local dir = fs.getDir(dst)
-    dst = fs.combine(dir, uniqueName(dir, fs.getName(dst)))
+    -- Audio/lyrics: prefer the copy with a beside .lrc pair; never mint "Name 2"
+    local dstName = fs.getName(dst)
+    if isAudio(dstName) and isAudio(fs.getName(src)) then
+      local srcPair = hasBesideLrc and hasBesideLrc(src)
+      local dstPair = hasBesideLrc and hasBesideLrc(dst)
+      if srcPair and not dstPair then
+        pcall(fs.delete, dst)
+      else
+        pcall(fs.delete, src)
+        return true, nil, dst
+      end
+    elseif isLrc(dstName) and isLrc(fs.getName(src)) then
+      pcall(fs.delete, src)
+      return true, nil, dst
+    else
+      local dir = fs.getDir(dst)
+      dst = fs.combine(dir, uniqueName(dir, dstName))
+    end
   end
   local ok, err = pcall(fs.move, src, dst)
   return ok, err, dst
@@ -323,17 +410,7 @@ local function uniqueLibraryRoots()
   return out
 end
 
-local function isWeakArtist(name)
-  local n = norm(name)
-  return n == "" or n == "singles" or n == "various" or n == "unknown"
-end
-
-local function isWeakAlbum(name)
-  local n = norm(name)
-  return n == "" or n == "singles" or n == "unknown"
-end
-
-local function hasBesideLrc(audioPath)
+hasBesideLrc = function(audioPath)
   local file = fs.getName(audioPath)
   if not isAudio(file) then return false end
   local base = file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
@@ -371,29 +448,198 @@ local function betterAudio(a, b)
   return a.path < b.path
 end
 
+-- Merge every file from srcDir into destDir; delete srcDir when empty.
+local function mergeDirInto(srcDir, destDir, label)
+  if srcDir == destDir then return 0 end
+  print((opts.dryRun and "  ~ merge " or "  merge ") .. srcDir .. " → " .. destDir
+    .. (label and (" [" .. label .. "]") or ""))
+  local moved = 0
+  if opts.dryRun then
+    for _, f in ipairs(listDir(srcDir)) do
+      moved = moved + 1
+    end
+    return moved
+  end
+  ensureDir(destDir)
+  for _, f in ipairs(listDir(srcDir)) do
+    local src = fs.combine(srcDir, f)
+    local dst = fs.combine(destDir, f)
+    if fs.isDir(src) then
+      moved = moved + mergeDirInto(src, dst, nil)
+    else
+      if fs.exists(dst) then
+        -- Prefer keeper with beside .lrc; else keep existing dest and drop src
+        local srcIsAudio, dstIsAudio = isAudio(f), isAudio(f)
+        if srcIsAudio and dstIsAudio then
+          local srcPair = hasBesideLrc(src)
+          local dstPair = hasBesideLrc(dst)
+          if srcPair and not dstPair then
+            deletePath(dst)
+            local ok = select(1, movePath(src, dst))
+            if ok then moved = moved + 1 end
+          else
+            deletePath(src)
+            moved = moved + 1
+          end
+        else
+          -- non-audio clash: keep dest, drop src duplicate name
+          deletePath(src)
+          moved = moved + 1
+        end
+      else
+        local ok = select(1, movePath(src, dst))
+        if ok then moved = moved + 1 end
+      end
+    end
+  end
+  if #listDir(srcDir) == 0 then pcall(fs.delete, srcDir) end
+  return moved
+end
+
+local function pruneEmptyDirs(dir, depth)
+  if depth > 24 or not (fs.exists(dir) and fs.isDir(dir)) then return 0 end
+  local n = 0
+  for _, name in ipairs(listDir(dir)) do
+    local fp = fs.combine(dir, name)
+    if fs.isDir(fp) then
+      n = n + pruneEmptyDirs(fp, depth + 1)
+      if #listDir(fp) == 0 then
+        local _, wasCollision = stripCollisionSuffix(name)
+        print((opts.dryRun and "  ~ prune " or "  prune ") .. fp
+          .. (wasCollision and " (collision leftover)" or ""))
+        if not opts.dryRun then pcall(fs.delete, fp) end
+        n = n + 1
+      end
+    end
+  end
+  return n
+end
+
+-- Fold "Album 2" / "Album_2" sibling dirs into canonical "Album".
+local function mergeCollisionAlbums(artistDir)
+  local merged = 0
+  local children = listDir(artistDir)
+  local byCanon = {}
+  for _, name in ipairs(children) do
+    local fp = fs.combine(artistDir, name)
+    if fs.isDir(fp) then
+      local canon = select(1, stripCollisionSuffix(name))
+      byCanon[canon] = byCanon[canon] or {}
+      byCanon[canon][#byCanon[canon] + 1] = { name = name, path = fp }
+    end
+  end
+  for canon, group in pairs(byCanon) do
+    if #group >= 2 then
+      table.sort(group, function(a, b)
+        local ac = (a.name == canon) and 0 or 1
+        local bc = (b.name == canon) and 0 or 1
+        if ac ~= bc then return ac < bc end
+        return a.name < b.name
+      end)
+      local keep = group[1]
+      -- Prefer exact canon folder name as destination
+      local dest = fs.combine(artistDir, canon)
+      if keep.name ~= canon then
+        if opts.dryRun or not fs.exists(dest) then
+          print((opts.dryRun and "  ~ rename " or "  rename ")
+            .. keep.path .. " → " .. dest)
+          if not opts.dryRun then
+            ensureDir(fs.getDir(dest))
+            pcall(fs.move, keep.path, dest)
+          end
+          keep.path = dest
+          keep.name = canon
+        end
+      end
+      for i = 2, #group do
+        merged = merged + mergeDirInto(group[i].path, keep.path, "collision")
+      end
+    elseif #group == 1 and group[1].name ~= canon then
+      local dest = fs.combine(artistDir, canon)
+      if not fs.exists(dest) then
+        print((opts.dryRun and "  ~ rename " or "  rename ")
+          .. group[1].path .. " → " .. dest)
+        if not opts.dryRun then
+          pcall(fs.move, group[1].path, dest)
+        end
+        merged = merged + 1
+      else
+        merged = merged + mergeDirInto(group[1].path, dest, "collision")
+      end
+    end
+  end
+  return merged
+end
+
 local function runMusic()
   print(modeTag() .. "=== Music tidy (Artist/Album + Singles"
     .. (opts.dedupe and " + dupe cleanup) ===" or "; audio dedupe off) ==="))
-  local movedFolders, movedSingles, deduped = 0, 0, 0
+  local movedFolders, movedSingles, deduped, collisionMerged = 0, 0, 0, 0
 
   for _, root in ipairs(musicContainers()) do
     print("  root " .. root)
     for _, entry in ipairs(listDir(root)) do
       local entryPath = fs.combine(root, entry)
       if fs.isDir(entryPath) then
-        local artist, album = parseArtistAlbum(entry)
+        local artist, album, titleHint = parseArtistAlbum(entry)
         if artist then
           local destDir = fs.combine(root, artist, album)
           print("  nest  " .. entryPath .. " → " .. destDir)
           if not opts.dryRun then
             ensureDir(fs.combine(root, artist))
+            mergeDirInto(entryPath, destDir, "nest")
+          else
+            print("  ~ nest contents of " .. entryPath)
+          end
+          movedFolders = movedFolders + 1
+        elseif titleHint then
+          -- "Singles - Title" / "Singles - Title 2" → Various/Singles (song = Title)
+          local destDir = fs.combine(root, "Various", "Singles")
+          print("  singles-title " .. entryPath .. " → " .. destDir
+            .. " (song " .. titleHint .. ")")
+          if not opts.dryRun then
+            ensureDir(fs.combine(root, "Various"))
             ensureDir(destDir)
             for _, f in ipairs(listDir(entryPath)) do
               local src = fs.combine(entryPath, f)
-              local ok, err = movePath(src, fs.combine(destDir, f))
-              if not ok then printError("    ! " .. tostring(err)) end
+              if not fs.isDir(src) and isAudio(f) then
+                local stem = f:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+                local canonStem = canonicalStem(stem)
+                local destName = f
+                -- Prefer the folder's title when the file stem is empty/generic/collision
+                if canonStem == "" or norm(canonStem) == norm(titleHint)
+                    or select(2, stripCollisionSuffix(stem)) then
+                  destName = titleHint .. ".dfpwm"
+                end
+                local ok, err = movePath(src, fs.combine(destDir, destName))
+                if ok then
+                  movedSingles = movedSingles + 1
+                  -- Bring beside .lrc along under the dest stem
+                  local srcLrc = fs.combine(entryPath, stem .. ".lrc")
+                  if fs.exists(srcLrc) and not fs.isDir(srcLrc) then
+                    local dstLrc = fs.combine(destDir,
+                      destName:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc")
+                    movePath(srcLrc, dstLrc)
+                  end
+                else
+                  printError("    ! " .. tostring(err))
+                end
+              elseif not fs.isDir(src) and isLrc(f) then
+                -- leftover .lrc without audio handled below / lyrics pass
+              elseif fs.isDir(src) then
+                mergeDirInto(src, destDir, "singles-title")
+              end
+            end
+            -- Move any remaining loose .lrc using titleHint
+            for _, f in ipairs(listDir(entryPath)) do
+              local src = fs.combine(entryPath, f)
+              if not fs.isDir(src) and isLrc(f) then
+                movePath(src, fs.combine(destDir, titleHint .. ".lrc"))
+              end
             end
             if #listDir(entryPath) == 0 then pcall(fs.delete, entryPath) end
+          else
+            movedSingles = movedSingles + 1
           end
           movedFolders = movedFolders + 1
         else
@@ -424,16 +670,50 @@ local function runMusic()
               end
             end
           end
+          -- Collision-named artist folders: "Panic 2" → merge into "Panic"
+          local canonEntry = select(1, stripCollisionSuffix(entry))
+          if canonEntry ~= entry then
+            local destArtist = fs.combine(root, canonEntry)
+            if fs.exists(destArtist) and fs.isDir(destArtist) then
+              collisionMerged = collisionMerged + mergeDirInto(entryPath, destArtist, "artist-collision")
+            elseif not fs.exists(destArtist) then
+              print((opts.dryRun and "  ~ rename " or "  rename ")
+                .. entryPath .. " → " .. destArtist)
+              if not opts.dryRun then pcall(fs.move, entryPath, destArtist) end
+              collisionMerged = collisionMerged + 1
+            end
+          end
+        end
+      end
+    end
+    -- Merge Album 2 → Album under each artist in this root
+    for _, artistName in ipairs(listDir(root)) do
+      local artistPath = fs.combine(root, artistName)
+      if fs.isDir(artistPath) then
+        local low = artistName:lower()
+        if low ~= "lyrics" and low ~= "lyrics-pack" and low ~= "sfx" and low ~= "music" then
+          collisionMerged = collisionMerged + mergeCollisionAlbums(artistPath)
+        elseif low == "music" then
+          for _, sub in ipairs(listDir(artistPath)) do
+            local sp = fs.combine(artistPath, sub)
+            if fs.isDir(sp) then
+              collisionMerged = collisionMerged + mergeCollisionAlbums(sp)
+            end
+          end
         end
       end
     end
   end
 
   if not opts.dedupe then
+    local pruned = 0
+    for _, root in ipairs(uniqueLibraryRoots()) do
+      pruned = pruned + pruneEmptyDirs(root, 0)
+    end
     print("  audio dedupe skipped (--safe / --no-dedupe)")
     print(string.format(
-      "  nested folders: %d  singles files: %d  audio deduped: 0",
-      movedFolders, movedSingles
+      "  nested folders: %d  singles files: %d  collision merges: %d  pruned dirs: %d  audio deduped: 0",
+      movedFolders, movedSingles, collisionMerged, pruned
     ))
     return
   end
@@ -445,13 +725,18 @@ local function runMusic()
   local function collectAudio(path, file, artistName, albumName)
     if seenPaths[path] or not isAudio(file) then return end
     seenPaths[path] = true
-    local sk = songKeys(file)[1] or norm(file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", ""))
+    -- Canonical key so "Palaces 2.dfpwm" groups with "Palaces.dfpwm"
+    local sk = norm(canonicalStem(file))
+    if sk == "" then
+      sk = songKeys(file)[1] or norm(file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", ""))
+    end
     if sk == "" then return end
+    local albumCanon = select(1, stripCollisionSuffix(albumName or "Singles"))
     candidates[#candidates + 1] = {
       path = path,
       name = file,
       artist = artistName or "Singles",
-      album = albumName or "Singles",
+      album = albumCanon,
       songKey = sk,
       size = fileSize(path),
       hasLrc = hasBesideLrc(path),
@@ -483,20 +768,24 @@ local function runMusic()
             if fs.isDir(cp) then hasAlbumDirs = true
             elseif isAudio(child) then hasDirectAudio = true end
           end
-          local parsedArtist, parsedAlbum = parseArtistAlbum(entry)
+          local parsedArtist, parsedAlbum, titleHint = parseArtistAlbum(entry)
           if hasDirectAudio and parsedArtist then
             walkAlbum(entryPath, parsedArtist, parsedAlbum)
+          elseif hasDirectAudio and titleHint then
+            walkAlbum(entryPath, "Various", "Singles")
           elseif hasAlbumDirs then
+            local artistCanon = select(1, stripCollisionSuffix(entry))
             for _, albumName in ipairs(children) do
               local albumPath = fs.combine(entryPath, albumName)
               if fs.isDir(albumPath) then
-                walkAlbum(albumPath, entry, albumName)
+                local albumCanon = select(1, stripCollisionSuffix(albumName))
+                walkAlbum(albumPath, artistCanon, albumCanon)
               elseif isAudio(albumName) then
-                collectAudio(albumPath, albumName, entry, "Singles")
+                collectAudio(albumPath, albumName, artistCanon, "Singles")
               end
             end
           elseif hasDirectAudio then
-            walkAlbum(entryPath, "Various", entry)
+            walkAlbum(entryPath, "Various", select(1, stripCollisionSuffix(entry)))
           end
         end
       elseif isAudio(entry) then
@@ -609,9 +898,23 @@ local function runMusic()
     end
   end
 
+  -- Second pass: merge any remaining collision album folders, prune empties
+  for _, root in ipairs(musicContainers()) do
+    for _, artistName in ipairs(listDir(root)) do
+      local artistPath = fs.combine(root, artistName)
+      if fs.isDir(artistPath) then
+        collisionMerged = collisionMerged + mergeCollisionAlbums(artistPath)
+      end
+    end
+  end
+  local pruned = 0
+  for _, root in ipairs(uniqueLibraryRoots()) do
+    pruned = pruned + pruneEmptyDirs(root, 0)
+  end
+
   print(string.format(
-    "  nested folders: %d  singles files: %d  audio scanned: %d  audio deduped: %d",
-    movedFolders, movedSingles, #candidates, deduped
+    "  nested folders: %d  singles files: %d  collision merges: %d  pruned dirs: %d  audio scanned: %d  audio deduped: %d",
+    movedFolders, movedSingles, collisionMerged, pruned, #candidates, deduped
   ))
 end
 
@@ -890,20 +1193,23 @@ local function runLyrics()
             if fs.isDir(cp) then hasAlbumDirs = true
             elseif isAudio(child) then hasDirectAudio = true end
           end
-          local parsedArtist, parsedAlbum = parseArtistAlbum(entry)
+          local parsedArtist, parsedAlbum, titleHint = parseArtistAlbum(entry)
           if hasDirectAudio and parsedArtist then
             addAudioInDir(entryPath, parsedArtist, parsedAlbum)
+          elseif hasDirectAudio and titleHint then
+            addAudioInDir(entryPath, "Various", "Singles")
           elseif hasAlbumDirs then
+            local artistCanon = select(1, stripCollisionSuffix(entry))
             for _, albumName in ipairs(children) do
               local albumPath = fs.combine(entryPath, albumName)
               if fs.isDir(albumPath) then
-                addAudioInDir(albumPath, entry, albumName)
+                addAudioInDir(albumPath, artistCanon, select(1, stripCollisionSuffix(albumName)))
               elseif isAudio(albumName) then
-                addTrack(albumPath, albumName, entry, "Singles")
+                addTrack(albumPath, albumName, artistCanon, "Singles")
               end
             end
           elseif hasDirectAudio then
-            addAudioInDir(entryPath, "Various", entry)
+            addAudioInDir(entryPath, "Various", select(1, stripCollisionSuffix(entry)))
           end
         end
       elseif isAudio(entry) then
@@ -1331,20 +1637,166 @@ local function runLyrics()
   end
 end
 
+------------------------------------------------------------------ 4) Computer root cleanup
+-- Keep scripts/startup/system dirs. Move loose .dfpwm/.lrc onto disks; clear leftovers.
+local ROOT_KEEP_EXACT = {
+  rom = true, music = true, sfx = true, lyrics = true,
+  ["lyrics-pack"] = true, inbox = true, drops = true,
+  ["lyrics-inbox"] = true, startup = true,
+}
+
+local function isProtectedRootEntry(name)
+  local low = tostring(name or ""):lower()
+  if ROOT_KEEP_EXACT[low] then return true end
+  if low:match("^disk%d*$") then return true end
+  if low:match("%.lua$") then return true end
+  if low:match("^%.") then return true end -- .settings etc.
+  if low == "wsinfo" or low == "changelog.txt" or low == "readme.txt" then return true end
+  return false
+end
+
+local function pickMusicDest(needBytes, fileName)
+  local need = (needBytes or 0) + RESERVE
+  local candidates = {}
+  local function consider(mount, musicRoot, pri)
+    local mpath = mount == "" and "/" or mount
+    local free = freeSpace(mpath)
+    if free >= need then
+      candidates[#candidates + 1] = {
+        mount = mount, root = musicRoot, free = free, pri = pri,
+      }
+    end
+  end
+  for _, m in ipairs(listFloppyMounts()) do
+    local mr = fs.combine(m, "music")
+    if fs.exists(mr) and fs.isDir(mr) then
+      consider(m, mr, 1)
+    else
+      consider(m, mr, 2)
+    end
+    -- Also allow artist trees directly on disk root
+    consider(m, m, 3)
+  end
+  if fs.exists("music") and fs.isDir("music") then
+    consider("", "music", 4)
+  else
+    consider("", "music", 5)
+  end
+  table.sort(candidates, function(a, b)
+    if a.pri ~= b.pri then return a.pri < b.pri end
+    return a.free > b.free
+  end)
+  local c = candidates[1]
+  if not c then return nil end
+  return fs.combine(c.root, "Various", "Singles", fileName), c.mount, c.root
+end
+
+local function runRootCleanup(phase)
+  -- phase "early": move loose root .dfpwm onto disks (before music tidy/lyrics)
+  -- phase "late":  sweep leftover root .dfpwm/.lrc after lyrics matching
+  phase = phase or "late"
+  print(modeTag() .. "=== Root cleanup (" .. phase .. ") ===")
+  local movedAudio, movedLrc, deleted = 0, 0, 0
+
+  for _, name in ipairs(listDir("")) do
+    if not isProtectedRootEntry(name) then
+      local path = name -- root-relative
+      if not fs.isDir(path) then
+        if isAudio(name) and not isSfxName(name) then
+          local dest = select(1, pickMusicDest(fileSize(path), name))
+          if dest then
+            print((opts.dryRun and "  ~ root-audio " or "  root-audio ")
+              .. path .. " → " .. dest)
+            local ok, err = movePath(path, dest)
+            if ok then
+              movedAudio = movedAudio + 1
+              -- Sibling .lrc with same stem rides along
+              local stem = name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+              local sib = stem .. ".lrc"
+              if fs.exists(sib) and not fs.isDir(sib) and not isProtectedRootEntry(sib) then
+                local dstLrc = dest:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc"
+                print((opts.dryRun and "  ~ root-lrc " or "  root-lrc ")
+                  .. sib .. " → " .. dstLrc)
+                if movePath(sib, dstLrc) then movedLrc = movedLrc + 1 end
+              end
+            else
+              printError("  ! " .. tostring(err))
+            end
+          else
+            printError("  ! no disk room for root audio " .. path)
+          end
+        elseif isLrc(name) and phase == "late" then
+          -- After lyrics pass: anything still on root is unmatched or leftover.
+          -- Park under /lyrics (or disk lyrics) so ls root stays clean.
+          local destName = name
+          local dest = fs.combine("lyrics", destName)
+          if not fs.exists("lyrics") then
+            if opts.dryRun then
+              print("  ~ create /lyrics")
+            else
+              ensureDir("lyrics")
+            end
+          end
+          -- Prefer a floppy lyrics folder when computer is tight
+          local need = fileSize(path) + RESERVE
+          for _, m in ipairs(listFloppyMounts()) do
+            local lr = fs.combine(m, "lyrics")
+            if freeSpace(m) >= need then
+              dest = fs.combine(lr, destName)
+              break
+            end
+          end
+          print((opts.dryRun and "  ~ root-lrc " or "  root-lrc ")
+            .. path .. " → " .. dest)
+          local ok, err = movePath(path, dest)
+          if ok then movedLrc = movedLrc + 1
+          else printError("  ! " .. tostring(err)) end
+        end
+      elseif phase == "late" then
+        -- Empty collision leftover folders on root (not protected)
+        local _, wasCollision = stripCollisionSuffix(name)
+        if wasCollision and #listDir(path) == 0 then
+          print((opts.dryRun and "  ~ prune root " or "  prune root ") .. path)
+          if deletePath(path) then deleted = deleted + 1 end
+        end
+      end
+    end
+  end
+
+  -- Late sweep: if a root .lrc/.dfpwm still exists after moves failed partially, report
+  if phase == "late" and not opts.dryRun then
+    for _, name in ipairs(listDir("")) do
+      if not isProtectedRootEntry(name) and not fs.isDir(name) then
+        if isAudio(name) or isLrc(name) then
+          print("  leftover root media (could not move): " .. name)
+        end
+      end
+    end
+  end
+
+  print(string.format(
+    "  root: audio moved=%d  lrc moved=%d  pruned=%d",
+    movedAudio, movedLrc, deleted
+  ))
+end
+
 ------------------------------------------------------------------ main
-print(modeTag() .. "sort-music — music + sfx + lyrics")
+print(modeTag() .. "sort-music — music + sfx + root + lyrics")
 if opts.dryRun then
-  print("Preview only (reports moves + dupe cleanup). Re-run with --apply to write.")
+  print("Preview only (reports moves + merges + deletes). Re-run with --apply to write.")
 elseif opts.dedupe then
   print("Audio dupe cleanup ON: keeps best .dfpwm+.lrc (prefer Artist/Album); deletes extras.")
+  print("Collision folders (Name 2) merge into Name. Root loose .dfpwm/.lrc → disks.")
   print("Pass --safe or --no-dedupe to skip audio deletes.")
 else
-  print("Audio dupe cleanup OFF (--safe / --no-dedupe). Nest/Singles/SFX/lyrics only.")
+  print("Audio dupe cleanup OFF (--safe / --no-dedupe). Nest/Singles/root/SFX/lyrics only.")
 end
 
 if opts.doSfx then runSfx() end
+if opts.doRoot then runRootCleanup("early") end
 if opts.doMusic then runMusic() end
 if opts.doLyrics then runLyrics() end
+if opts.doRoot then runRootCleanup("late") end
 
 print("---")
 print(modeTag() .. "Done.")
