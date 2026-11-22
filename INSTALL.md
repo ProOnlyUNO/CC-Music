@@ -76,17 +76,17 @@ Also accepts **`.lrc`** drops: matches to a library `.dfpwm` (basename / normali
 
 ### Optional: one-shot sort (music + SFX + lyrics)
 
-`sort-music.lua` is the single in-game sorter (bulk tidy / orphan lyrics):
+`sort-music.lua` is the single in-game sorter (bulk tidy / orphan lyrics / dupe cleanup):
 
 - Music: `Artist - Album` → `Artist/Album`; loose tracks → `Singles/`
 - SFX: create `/sfx`, move loose root `SFX*.dfpwm` into it
 - Lyrics: match **flat `.lrc` drops** (computer/disk root — CC can’t drop folders) or an optional pack tree; place beside `.dfpwm`; mirror `/lyrics` with multi-disk spill; **dedupe** extra `.lrc`
-- Audio **dedupe is opt-in** (`--dedupe`). Plain `--apply` never deletes `.dfpwm`.
+- Audio **dupe cleanup is ON by default** with `--apply`: scans every `diskN` / `music` / Artist/Album spot, keeps the best `.dfpwm`+`.lrc` pair (prefer Artist/Album), deletes weaker extras. Dry-run only reports. Use `--safe` / `--no-dedupe` to skip audio deletes.
 
 ```text
-sort-music                  -- preview (no writes)
-sort-music --apply          -- nest + Singles + SFX + lyrics
-sort-music --apply --dedupe -- also delete duplicate .dfpwm (opt-in)
+sort-music                  -- preview (no writes; reports moves + dupes)
+sort-music --apply          -- nest + Singles + SFX + lyrics + dupe cleanup
+sort-music --apply --safe   -- tidy without deleting audio dupes
 ```
 
 Drop `.lrc` files onto the computer or a disk root, then `--apply`. Details: `fetch-lyrics.md`.
@@ -189,7 +189,7 @@ Flow: pick **artist** → **album** → a **song**, or the top **DELETE ALBUM** 
 
 1. **Visualizer marquee** — copy Project `docs/visualizer.lua` onto **both** side PCs (replace). Restart each side PC (startup preferred). Play a long title; top line should scroll with a short pause at start/end. Toggle LYRICS — header still scrolls if it doesn’t fit. Spectrum/waveform unchanged when lyrics is off.
 2. **Importer `.lrc`** — copy Project `docs/Importer.lua` onto the main computer as `Importer.lua` (or `uploader.lua`). Run it, pick artist/album, drop `.dfpwm` and/or `.lrc` on the computer screen. Matched lyrics land beside the song; misses print clearly. Same-drop song+lyric pairs work.
-3. **Bulk orphans only** — if many `.lrc` are already on the computer/disks: `sort-music --apply --lyrics-only` (no audio deletes). Do **not** pass `--dedupe` unless you really want duplicate `.dfpwm` removed.
+3. **Bulk orphans only** — if many `.lrc` are already on the computer/disks: `sort-music --apply --lyrics-only` (lyrics only; no audio deletes). For full tidy + dupe cleanup: `sort-music --apply`. Preview first with bare `sort-music`. Use `--safe` if you want tidy without deleting audio dupes.
 4. Restart jukebox after placing lyrics if you want `(L)` markers without waiting for F5 rescan quirks.
 
 ## Pocket Advanced Computer
