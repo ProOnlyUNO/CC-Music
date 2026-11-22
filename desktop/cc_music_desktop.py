@@ -50,25 +50,28 @@ DEFAULT_CONVERT_OUT = APP_DIR / "dfpwm_out"
 DEFAULT_LYRICS_PACK = APP_DIR / "lyrics_pack"
 YTMP3_ALT_URL = "https://media.ytmp3.gg/tools/youtube-playlist-downloader/mkehhz"
 
-# Matrix / binary cyan — glass panels (semi-transparent look over the bg)
+# Matrix / binary cyan — translucent glass so the background reads through
 COLORS = {
-    "bg_deep": "#050b10",
-    "panel": "#0b1824",
-    "panel_hi": "#123048",
-    "panel_glass": "#0a1a28",
-    "border": "#2a6a78",
-    "border_soft": "#1a4050",
-    "text": "#e6fff8",
-    "text_dim": "#9fd4c4",
-    "accent": "#4affe0",
-    "entry_bg": "#06141e",
+    "bg_deep": "#03080c",
+    "panel": "#0a1620",
+    "panel_hi": "#14384c",
+    "panel_glass": "#07141c",
+    "border": "#3a8a96",
+    "border_soft": "#1e4a58",
+    "text": "#f2fffb",
+    "text_dim": "#8ecaba",
+    "accent": "#5dffea",
+    "accent_soft": "#2a9a88",
+    "entry_bg": "#051018",
     "entry_fg": "#f0fffa",
-    "log_bg": "#041018",
-    "log_fg": "#c8ffe8",
-    "scrim": (3, 12, 18),
-    # RGBA glass overlays drawn onto the Matrix background
-    "glass_fill": (8, 28, 40, 118),
-    "glass_edge": (60, 220, 200, 70),
+    "log_bg": "#030e14",
+    "log_fg": "#b8f5dc",
+    "scrim": (2, 10, 14),
+    # Soft glass overlays — keep alpha low so Matrix binary shows through
+    "glass_fill": (6, 22, 32, 72),
+    "glass_edge": (90, 235, 215, 95),
+    "glass_well": (5, 18, 28, 58),
+    "glass_log": (3, 14, 22, 88),
 }
 
 
@@ -151,61 +154,70 @@ class App(tk.Tk):
         from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageTk
 
         img = self._bg_src.resize((width, height), Image.Resampling.LANCZOS)
-        # Keep the Matrix binary bright so it reads through glass panels
-        img = ImageEnhance.Brightness(img).enhance(0.92)
-        img = ImageEnhance.Contrast(img).enhance(1.08)
+        # Brighten Matrix rain so it survives soft glass overlays
+        img = ImageEnhance.Brightness(img).enhance(1.05)
+        img = ImageEnhance.Contrast(img).enhance(1.12)
+        img = ImageEnhance.Color(img).enhance(1.08)
         base = img.convert("RGBA")
         overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         scrim = COLORS["scrim"]
-        # Light scrim only — Matrix stays visible behind the UI
-        top_h = max(80, int(height * 0.28))
+        # Very light vignette only — do not bury the Matrix under solid dark
+        top_h = max(60, int(height * 0.22))
         for y in range(top_h):
             t = y / max(1, top_h - 1)
-            alpha = int(110 * (1.0 - t * 0.7))
+            alpha = int(70 * (1.0 - t * 0.85))
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
-        bot0 = int(height * 0.72)
+        bot0 = int(height * 0.78)
         for y in range(bot0, height):
             t = (y - bot0) / max(1, height - bot0)
-            alpha = int(40 + 70 * t)
+            alpha = int(20 + 55 * t)
             draw.line([(0, y), (width, y)], fill=(*scrim, alpha))
 
-        # Frosted glass panels (content shell + log strip) — translucent so binary shows through
+        # Frosted glass shell — translucent + soft blur so binary shows through
         glass = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        gdraw = ImageDraw.Draw(glass)
-        mx, my = int(width * 0.03), int(height * 0.03)
-        mw, mh = int(width * 0.94), int(height * 0.94)
-        # Soft blur plate under the shell
+        mx, my = int(width * 0.028), int(height * 0.028)
+        mw, mh = int(width * 0.944), int(height * 0.944)
         plate = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         pdraw = ImageDraw.Draw(plate)
         pdraw.rounded_rectangle(
             [mx, my, mx + mw, my + mh],
-            radius=18,
+            radius=20,
             fill=COLORS["glass_fill"],
             outline=COLORS["glass_edge"],
             width=2,
         )
-        # Inner tab well — slightly clearer glass
-        tab_top = my + int(height * 0.09)
-        tab_bot = my + int(height * 0.62)
+        # Inner tab well — clearer glass, Matrix still readable
+        tab_top = my + int(height * 0.088)
+        tab_bot = my + int(height * 0.60)
         pdraw.rounded_rectangle(
-            [mx + 14, tab_top, mx + mw - 14, tab_bot],
-            radius=12,
-            fill=(6, 22, 34, 90),
-            outline=(80, 230, 210, 55),
+            [mx + 12, tab_top, mx + mw - 12, tab_bot],
+            radius=14,
+            fill=COLORS["glass_well"],
+            outline=(100, 240, 220, 70),
             width=1,
         )
-        # Log strip
-        log_top = my + int(height * 0.66)
+        # Log strip — slightly denser for readability, still translucent
+        log_top = my + int(height * 0.645)
         pdraw.rounded_rectangle(
-            [mx + 14, log_top, mx + mw - 14, my + mh - 14],
-            radius=12,
-            fill=(4, 16, 26, 130),
-            outline=(80, 230, 210, 45),
+            [mx + 12, log_top, mx + mw - 12, my + mh - 12],
+            radius=14,
+            fill=COLORS["glass_log"],
+            outline=(90, 230, 210, 55),
             width=1,
         )
-        plate = plate.filter(ImageFilter.GaussianBlur(radius=0.6))
-        glass = Image.alpha_composite(glass, plate)
+        # Soft blur for frosted glass, then a sharp edge pass for polish
+        blurred = plate.filter(ImageFilter.GaussianBlur(radius=2.4))
+        edge = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        edraw = ImageDraw.Draw(edge)
+        edraw.rounded_rectangle(
+            [mx, my, mx + mw, my + mh],
+            radius=20,
+            outline=COLORS["glass_edge"],
+            width=2,
+        )
+        glass = Image.alpha_composite(glass, blurred)
+        glass = Image.alpha_composite(glass, edge)
         composed = Image.alpha_composite(Image.alpha_composite(base, overlay), glass).convert("RGB")
         return ImageTk.PhotoImage(composed)
 
@@ -258,11 +270,12 @@ class App(tk.Tk):
             "Header.TLabel",
             background=deep,
             foreground=accent,
-            font=("Segoe UI Semibold", 17),
+            font=("Segoe UI Semibold", 18),
         )
         style.configure("Subhead.TLabel", background=deep, foreground=dim, font=("Segoe UI", 9))
         style.configure("Dim.TLabel", background=deep, foreground=dim)
         style.configure("Glass.TLabel", background=deep, foreground=fg)
+        style.configure("Section.TLabel", background=deep, foreground=accent, font=("Segoe UI Semibold", 10))
 
         style.configure(
             "TButton",
@@ -270,14 +283,28 @@ class App(tk.Tk):
             foreground=fg,
             bordercolor=border,
             focusthickness=1,
-            padding=(10, 4),
+            padding=(12, 5),
+            font=("Segoe UI", 9),
         )
         style.map(
             "TButton",
-            background=[("active", "#1a4a62"), ("disabled", "#0a1822")],
+            background=[("active", "#1c5568"), ("disabled", "#0a1822")],
             foreground=[("disabled", "#557788")],
         )
-        style.configure("TCheckbutton", background=deep, foreground=fg)
+        style.configure(
+            "Accent.TButton",
+            background="#176878",
+            foreground=COLORS["text"],
+            bordercolor=accent,
+            padding=(14, 6),
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#1f8498"), ("disabled", "#0a1822")],
+            foreground=[("disabled", "#557788")],
+        )
+        style.configure("TCheckbutton", background=deep, foreground=fg, font=("Segoe UI", 9))
         style.map(
             "TCheckbutton",
             background=[("active", deep), ("selected", deep)],
@@ -289,23 +316,25 @@ class App(tk.Tk):
             foreground=COLORS["entry_fg"],
             insertcolor=COLORS["entry_fg"],
             bordercolor=COLORS["border_soft"],
+            padding=4,
         )
         style.configure("TLabelframe", background=deep, foreground=accent, bordercolor=border)
-        style.configure("TLabelframe.Label", background=deep, foreground=accent)
-        style.configure("TNotebook", background=deep, borderwidth=0, tabmargins=(6, 4, 6, 0))
-        # Translucent-feeling tabs — dark cyan glass, selected pops with accent text
+        style.configure("TLabelframe.Label", background=deep, foreground=accent, font=("Segoe UI Semibold", 9))
+        style.configure("TNotebook", background=deep, borderwidth=0, tabmargins=(8, 6, 8, 0))
+        # Glass tabs — translucent cyan wash, selected tab with accent weight
         style.configure(
             "TNotebook.Tab",
-            background="#0c3040",
+            background="#0a2834",
             foreground=dim,
-            padding=(14, 7),
+            padding=(16, 8),
             borderwidth=0,
             lightcolor=border,
             darkcolor=deep,
+            font=("Segoe UI", 9),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", "#154858"), ("active", "#1a5568")],
+            background=[("selected", "#155868"), ("active", "#1a6070")],
             foreground=[("selected", accent), ("active", fg)],
         )
 
@@ -322,14 +351,17 @@ class App(tk.Tk):
         shell = ttk.Frame(self, style="Glass.TFrame", padding=0)
         shell.place(relx=0.03, rely=0.03, relwidth=0.94, relheight=0.94)
 
-        header = ttk.Frame(shell, style="Header.TFrame", padding=(14, 12, 14, 6))
+        header = ttk.Frame(shell, style="Header.TFrame", padding=(16, 14, 16, 8))
         header.pack(fill="x")
         ttk.Label(header, text=APP_TITLE, style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text=f"Download → Convert → Lyrics for your CC:Tweaked jukebox.  Developer: {DEVELOPER}  ·  v{APP_VERSION}",
+            text=(
+                f"Download → lyrics → Artist/Album → Convert for your CC:Tweaked jukebox.  "
+                f"Developer: {DEVELOPER}  ·  v{APP_VERSION}"
+            ),
             style="Subhead.TLabel",
-        ).pack(anchor="w")
+        ).pack(anchor="w", pady=(2, 0))
 
         nb = ttk.Notebook(shell)
         nb.pack(fill="both", expand=True, padx=14, pady=(6, 0))
@@ -462,8 +494,8 @@ class App(tk.Tk):
         ttk.Label(
             parent,
             text=(
-                "Uses yt-dlp (recommended). Install:  python -m pip install -U yt-dlp   "
-                "· also needs ffmpeg for MP3 extract. After download, switch to Convert.\n"
+                "Flow: download MP3s → auto-fetch LRCLIB lyrics (artist/title kept in tags) → "
+                "organize into Artist/Album → Convert. Needs yt-dlp + ffmpeg.\n"
                 f"Alternate (browser): {YTMP3_ALT_URL}"
             ),
             wraplength=740,
@@ -472,7 +504,12 @@ class App(tk.Tk):
 
         actions = ttk.Frame(parent, style="Card.TFrame")
         actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Download selected MP3s", command=self._start_download).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Download selected MP3s",
+            style="Accent.TButton",
+            command=self._start_download,
+        ).pack(side="left")
         ttk.Button(actions, text="Send folder → Convert", command=self._handoff_to_convert).pack(
             side="left", padx=(8, 0)
         )
@@ -524,7 +561,7 @@ class App(tk.Tk):
         self.conv_out = tk.StringVar(value=str(DEFAULT_CONVERT_OUT))
         self.conv_artist = tk.StringVar()
         self.conv_title_first = tk.BooleanVar(value=False)
-        self.conv_tags = tk.BooleanVar(value=False)
+        self.conv_tags = tk.BooleanVar(value=True)
         self.conv_flat = tk.BooleanVar(value=False)
         self.conv_overwrite = tk.BooleanVar(value=False)
         self.conv_dry = tk.BooleanVar(value=False)
@@ -555,14 +592,22 @@ class App(tk.Tk):
 
         ttk.Label(
             parent,
-            text="Requires ffmpeg 5.1+ on PATH (winget install ffmpeg). Output is Artist/Title.dfpwm by default.",
+            text=(
+                "Requires ffmpeg 5.1+ on PATH. Output is Artist/Album/Song.dfpwm "
+                "(tags + folder layout). Sibling .lrc files are copied beside each .dfpwm."
+            ),
             wraplength=740,
             style="Dim.TLabel",
         ).pack(anchor="w", pady=(8, 0))
 
         actions = ttk.Frame(parent)
         actions.pack(fill="x", pady=(10, 0))
-        ttk.Button(actions, text="Convert to DFPWM", command=self._start_convert).pack(side="left")
+        ttk.Button(
+            actions,
+            text="Convert to DFPWM",
+            style="Accent.TButton",
+            command=self._start_convert,
+        ).pack(side="left")
 
     def _build_lyrics(self, parent: ttk.Frame) -> None:
         self.lyr_root = tk.StringVar()
@@ -601,13 +646,13 @@ class App(tk.Tk):
             font=("Segoe UI", 10),
             height=18,
             borderwidth=0,
-            background=COLORS["panel"],
+            background=COLORS["entry_bg"],
             foreground=COLORS["text"],
             insertbackground=COLORS["text"],
             relief="flat",
             highlightthickness=0,
-            padx=4,
-            pady=2,
+            padx=6,
+            pady=4,
         )
         scroll = ttk.Scrollbar(wrap, command=text.yview)
         text.configure(yscrollcommand=scroll.set)
@@ -640,14 +685,17 @@ Open setup/ next to this app (START_HERE.txt) for which .lua goes on which compu
 
 4) Desktop tools flow (this app)
    a. Download (optional) — paste a YouTube playlist/album URL → Fetch titles
-      → check the tracks you want → Download selected MP3s
+      → check tracks → Download selected MP3s
+      → lyrics auto-fetch (LRCLIB) while artist/title are still known
+      → prompt for library root → organize Artist/Album/Song.mp3 (+ .lrc)
       → Send folder → Convert
       Needs yt-dlp:  python -m pip install -U yt-dlp
       Alternate (browser only): {YTMP3_ALT_URL}
-   b. Convert — Browse your MP3/WAV/FLAC folder → Convert to DFPWM
+   b. Convert — Browse the Artist/Album folder → Convert to DFPWM
+      Output: Artist/Album/Song.dfpwm (+ copies sibling .lrc)
       (needs ffmpeg 5.1+ on PATH: winget install ffmpeg)
-   c. Fetch lyrics — point at the .dfpwm folder → Fetch lyrics (public LRCLIB only)
-   d. Open output folder, copy the .dfpwm (+ .lrc) into Minecraft
+   c. Fetch lyrics — still available for libraries that need a re-scan
+   d. Open output folder, copy Artist/Album trees into Minecraft
    e. In-game: run Importer → drag-drop onto the computer screen (not a monitor)
    f. Restart jukebox (or F5) — songs with lyrics show (L)
 
@@ -830,6 +878,24 @@ You’re set — enjoy the music.
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _prompt_organize_root(self) -> Path | None:
+        """Ask for Artist/Album library root after a successful download."""
+        if not messagebox.askyesno(
+            APP_TITLE,
+            "Organize downloads into Artist/Album folders?\n\n"
+            "You'll pick a library root, then files land as:\n"
+            "  Artist / Album / Song.mp3  (+ .lrc beside it)",
+        ):
+            return None
+        initial = self.dl_out.get().strip() or str(Path.home() / "Music")
+        chosen = filedialog.askdirectory(
+            title="Library root for Artist/Album folders",
+            initialdir=initial if Path(initial).is_dir() else str(Path.home()),
+        )
+        if not chosen:
+            return None
+        return Path(chosen)
+
     def _start_download(self) -> None:
         if self._busy:
             messagebox.showwarning(APP_TITLE, "A job is already running.")
@@ -845,15 +911,18 @@ You’re set — enjoy the music.
 
         self._cancel = False
         self._set_busy(True)
-        self._append_log("--- Download: MP3 ---")
+        self._append_log("--- Download: MP3 + lyrics ---")
         self._last_out = Path(out)
         self.dl_status.set(f"Downloading {len(selected)} track(s)…")
+        playlist_title = self._playlist_title
 
         def work() -> None:
             try:
-                ok, fail, folder = download_core.download_entries(
+                ok, fail, folder, tracks = download_core.download_entries(
                     selected,
                     out,
+                    playlist_title=playlist_title,
+                    fetch_lyrics=True,
                     log=self._ui_log,
                     should_cancel=lambda: self._cancel,
                 )
@@ -861,12 +930,33 @@ You’re set — enjoy the music.
                 def done() -> None:
                     self.dl_status.set(f"Saved {ok}, failed {fail} → {folder}")
                     self._set_busy(False)
-                    if ok > 0:
-                        # Offer hand-off into Convert
+                    final_folder = folder
+                    if ok > 0 and tracks:
+                        lib = self._prompt_organize_root()
+                        if lib is not None:
+                            self._append_log("--- Organize: Artist/Album ---")
+                            try:
+                                final_folder = download_core.organize_tracks(
+                                    tracks, lib, log=self._ui_log
+                                )
+                                self.dl_out.set(str(final_folder))
+                                self._last_out = final_folder
+                                self.dl_status.set(
+                                    f"Organized {ok} track(s) → {final_folder}"
+                                )
+                            except Exception as e:  # noqa: BLE001
+                                self._append_log(f"ERROR organizing: {e}")
+                                messagebox.showerror(
+                                    APP_TITLE, f"Could not organize into Artist/Album:\n{e}"
+                                )
                         if messagebox.askyesno(
                             APP_TITLE,
-                            f"Downloaded {ok} MP3(s).\n\nSend this folder to the Convert tab?",
+                            f"Downloaded {ok} MP3(s)"
+                            + (" with lyrics where matched." if ok else ".")
+                            + f"\n\nFolder:\n{final_folder}\n\n"
+                            "Send this folder to the Convert tab?",
                         ):
+                            self.dl_out.set(str(final_folder))
                             self._handoff_to_convert()
 
                 self.after(0, done)
