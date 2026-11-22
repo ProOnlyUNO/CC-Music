@@ -80,6 +80,7 @@ python -m PyInstaller ^
   --hidden-import build_info ^
   --hidden-import convert_core ^
   --hidden-import download_core ^
+  --hidden-import genius_core ^
   --hidden-import lyrics_core ^
   --hidden-import meta_parse ^
   --hidden-import name_sanitize ^

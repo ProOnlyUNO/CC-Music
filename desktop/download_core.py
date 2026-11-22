@@ -53,7 +53,7 @@ class DownloadedTrack:
 
 @dataclass
 class SearchResult:
-    kind: str  # "song" | "playlist"
+    kind: str  # "song" | "playlist" | "album"
     title: str
     url: str
     id: str = ""
@@ -507,6 +507,212 @@ def search_youtube(
     if not results:
         raise RuntimeError(f"No YouTube results for “{q}”. Try another query.")
     return results
+
+
+_OFFICIAL_BAD = (
+    "cover",
+    "karaoke",
+    "instrumental",
+    "nightcore",
+    "8d audio",
+    "reaction",
+    "fan made",
+    "fanmade",
+    "sped up",
+    "slowed",
+    "remix",
+    "mashup",
+    "lyric video",  # prefer Topic/audio over random lyric uploads when both exist
+    "version 2",
+    "version 3",
+    "edit",
+    "bootleg",
+)
+
+
+def _norm_match_text(s: str) -> str:
+    s = (s or "").lower()
+    s = re.sub(r"[^\w\s]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def score_youtube_match(
+    result: SearchResult,
+    artist: str,
+    title: str,
+) -> int:
+    """Higher is better — prefer Topic / VEVO / official artist uploads."""
+    ch = _norm_match_text(result.channel or result.uploader or "")
+    up = _norm_match_text(result.uploader or "")
+    rt = _norm_match_text(result.title or "")
+    artist_n = _norm_match_text(artist)
+    title_n = _norm_match_text(title)
+    score = 0
+
+    # Auto-generated Topic channels are usually clean audio
+    if ch.endswith(" topic") or " topic" in ch or up.endswith(" topic"):
+        score += 120
+    if "vevo" in ch or "vevo" in up:
+        score += 100
+    if artist_n and (ch == artist_n or ch.startswith(artist_n + " ") or artist_n in ch):
+        score += 55
+    if "official" in ch or "official" in rt:
+        score += 45
+    if "official audio" in rt or "official music video" in rt:
+        score += 35
+    if title_n and (rt == title_n or rt.startswith(title_n + " ") or f" {title_n} " in f" {rt} "):
+        score += 55
+    elif title_n and title_n in rt:
+        score += 40
+    elif title_n:
+        # partial token overlap
+        tokens = [t for t in title_n.split() if len(t) > 2]
+        if tokens:
+            hit = sum(1 for t in tokens if t in rt)
+            score += int(30 * hit / len(tokens))
+    if artist_n and artist_n in rt:
+        score += 20
+    # Extra junk after the title (e.g. "Jesus Walks (Version 2)") when not in Genius title
+    if title_n and title_n in rt:
+        rest = rt.replace(title_n, " ", 1)
+        if any(x in rest for x in ("version", "remaster", "remix", "edit", "live")) and not any(
+            x in title_n for x in ("version", "remaster", "remix", "edit", "live")
+        ):
+            score -= 35
+
+    for bad in _OFFICIAL_BAD:
+        bad_n = _norm_match_text(bad)
+        if bad_n in rt and bad_n not in title_n:
+            score -= 55
+    if "live" in rt and "live" not in title_n:
+        score -= 25
+    return score
+
+
+def is_youtube_watch_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return "youtube.com/watch" in u or "youtu.be/" in u or "youtube.com/shorts/" in u
+
+
+def needs_youtube_match(entry: PlaylistEntry) -> bool:
+    """True when the entry still needs a YouTube watch URL (e.g. Genius track)."""
+    return not is_youtube_watch_url(entry.url or "")
+
+
+def find_best_youtube_match(
+    artist: str,
+    title: str,
+    *,
+    limit: int = 6,
+    log: LogFn | None = None,
+    progress: ProgressFn | None = None,
+) -> SearchResult:
+    """yt-dlp search ``Artist Title``; pick the best official/Topic-leaning hit."""
+    a = (artist or "").strip()
+    t = (title or "").strip()
+    if not t:
+        raise ValueError("Missing track title for YouTube match.")
+    query = f"{a} {t}".strip() if a else t
+    if progress:
+        progress("match", None, f"Matching YouTube — {a} — {t}" if a else f"Matching YouTube — {t}")
+    if log:
+        log(f"  yt match search: {query!r}")
+
+    results = search_youtube(
+        query,
+        limit=max(3, min(10, int(limit))),
+        include_songs=True,
+        include_playlists=False,
+        log=log,
+        progress=None,  # keep outer progress as match phase
+    )
+    ranked = sorted(
+        results,
+        key=lambda r: (-score_youtube_match(r, a, t), r.title.lower()),
+    )
+    best = ranked[0]
+    if log:
+        sc = score_youtube_match(best, a, t)
+        who = best.channel or best.uploader or "?"
+        log(f"  yt match → {best.title} [{who}] (score {sc})")
+    if progress:
+        progress("match", 1.0, f"Matched — {best.title}")
+    return best
+
+
+def entries_from_genius_album(album) -> tuple[str, list[PlaylistEntry]]:
+    """Convert a ``genius_core.GeniusAlbum`` into playlist entries (YouTube URL empty)."""
+    playlist_title = f"{album.artist} - {album.name}"
+    entries: list[PlaylistEntry] = []
+    for track in album.tracks:
+        entries.append(
+            PlaylistEntry(
+                index=track.index,
+                id=f"genius-{track.id}",
+                title=track.title,
+                url=track.url or album.url,
+                duration=None,
+                uploader=track.artist,
+                artist=track.artist or album.artist,
+                album=track.album or album.name,
+                track_title=track.title,
+            )
+        )
+    return playlist_title, entries
+
+
+def resolve_youtube_for_entries(
+    entries: Sequence[PlaylistEntry],
+    *,
+    log: LogFn | None = None,
+    progress: ProgressFn | None = None,
+    should_cancel: CancelFn | None = None,
+) -> list[PlaylistEntry]:
+    """Fill watch URLs for Genius (or other) entries via best YouTube match."""
+    selected = list(entries)
+    need = [e for e in selected if needs_youtube_match(e)]
+    if not need:
+        return selected
+
+    total = len(need)
+    if log:
+        log(f"Matching {total} track(s) on YouTube (prefer Topic / official)…")
+    matched = 0
+    for n, entry in enumerate(need, start=1):
+        if should_cancel and should_cancel():
+            if log:
+                log("YouTube match cancelled.")
+            break
+        artist = (entry.artist or entry.uploader or "").strip()
+        title = (entry.track_title or entry.title or "").strip()
+        label = f"{artist} — {title}" if artist else title
+        if progress:
+            overall = (n - 1) / total
+            progress("match", overall, f"Match {n}/{total}: {label}")
+        try:
+            best = find_best_youtube_match(
+                artist,
+                title,
+                log=log,
+                progress=None,
+            )
+            entry.url = best.url
+            # Keep Genius artist/album/title; only adopt YouTube id for download
+            if best.id:
+                entry.id = best.id
+            if best.uploader and not entry.uploader:
+                entry.uploader = best.uploader
+            if best.duration is not None:
+                entry.duration = best.duration
+            matched += 1
+        except Exception as e:  # noqa: BLE001
+            if log:
+                log(f"  match FAIL [{n}/{total}] {label}: {e}")
+    if progress:
+        progress("match", 1.0, f"Matched {matched}/{total} on YouTube")
+    if log:
+        log(f"YouTube match done — {matched}/{total}.")
+    return selected
 
 
 def entry_meta(entry: PlaylistEntry, playlist_title: str | None = None) -> TrackMeta:

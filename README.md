@@ -16,7 +16,7 @@
 | **Side visualizers** | Spectrum / waveform / particles on **4×4** monitors; **LYRICS** big-text mode |
 | **Pocket remote** | Wireless library sync + tap-to-play (`pocket_mp3`) |
 | **Importer / sort / delete** | Drag-drop `.dfpwm` + `.lrc`, tidy library, safe deletes |
-| **CC Music Tools (Windows)** | Download YouTube playlists → MP3, convert → `.dfpwm`, fetch lyrics (LRCLIB), install `setup/` map |
+| **CC Music Tools (Windows)** | Download YouTube playlists or Genius albums → MP3, convert → `.dfpwm`, fetch lyrics (LRCLIB), install `setup/` map |
 
 ## How to use
 
@@ -30,7 +30,7 @@
    python -m pip install -U yt-dlp
    ```
 4. Open the app:
-   - **Download** — paste a YouTube playlist/album URL → Fetch titles → check tracks → Download selected MP3s → Send folder → Convert
+   - **Download** — YouTube URL/search, or Genius album URL/search → Fetch titles → check tracks → Download (Genius auto-matches YouTube) → Send folder → Convert
    - **Convert** → **Fetch lyrics** (optional)
 5. Your install folder also gets the in-game **`setup/`** script map.
 
