@@ -1335,6 +1335,8 @@ local function accentColor()
   return ACCENTS[settings.accent] or colors.purple
 end
 
+-- Declare before rebuildPalette so assignments bind the local (not a global).
+local P
 local function rebuildPalette()
   local ac = accentColor()
   if isColor then
@@ -1365,8 +1367,22 @@ local function rebuildPalette()
     }
   end
 end
-local P
 rebuildPalette()
+-- Defensive: never draw with a nil palette (Lua scoping / reload edge cases).
+if not P or not P.bg then
+  P = {
+    bg = colors.black, fg = colors.white, dim = colors.lightGray,
+    panel = colors.gray, muted = colors.gray,
+    accent = colors.white, accentFg = colors.black,
+    hdrBg = colors.black, hdrFg = colors.white,
+    selBg = colors.white, selFg = colors.black,
+    play = colors.white, on = colors.white, off = colors.lightGray,
+    barOn = colors.white, barOff = colors.gray,
+    npBg = colors.gray, npFg = colors.white,
+    navBg = colors.gray, navFg = colors.lightGray, navOn = colors.white,
+    credit = colors.white,
+  }
+end
 
 local W, H = T.getSize()
 local D = window.create(T, 1, 1, W, H, true)
@@ -1849,6 +1865,8 @@ local function drawSearch()
 end
 
 local function draw()
+  if not P or not P.bg then rebuildPalette() end
+  if not P or not P.bg then return end
   D.setVisible(false)
   hits = {}
   D.setBackgroundColor(P.bg)
