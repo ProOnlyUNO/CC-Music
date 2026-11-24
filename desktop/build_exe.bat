@@ -84,6 +84,7 @@ python -m PyInstaller ^
   --hidden-import lyrics_core ^
   --hidden-import meta_parse ^
   --hidden-import name_sanitize ^
+  --hidden-import nfp_core ^
   --hidden-import update_check ^
   --hidden-import yt_dlp ^
   --collect-submodules yt_dlp ^
