@@ -5,12 +5,14 @@
       <disk label = artist>
           music/<Artist - Album>/<song>.dfpwm
           music/<Artist - Album>/<song>.lrc   (optional, beside audio)
+          music/<Artist - Album>/<song>.nfp   (optional pixel art, beside audio)
+          music/<Artist - Album>/cover.nfp    (optional album art)
 
   How to use:
       1. Run  Importer   (or  uploader  if saved under that name)
       2. Type the artist (autocompletes from your existing disk labels)
          and the album (blank = songs go in a folder named after the artist)
-      3. Drag .dfpwm and/or .lrc files onto this computer's screen
+      3. Drag .dfpwm and/or .lrc / .nfp files onto this computer's screen
          (the computer GUI, not a monitor)
       4. Keep dropping; press N to switch artist/album, Q to quit
 
@@ -22,6 +24,9 @@
       session folder when a song of that name is there or was just
       imported in the same drop. Write beside that .dfpwm; optional
       /lyrics mirror with multi-disk spill. Clear match/miss prints.
+
+  .nfp: same basename matching as .lrc — place beside the .dfpwm
+      (or as cover.nfp for album art). Keep with Artist/Album/song.
 
   For bulk orphan .lrc already on the computer, keep using:
       sort-music --apply --lyrics-only
@@ -112,6 +117,10 @@ local function isLrc(name)
   return type(name) == "string" and name:lower():match("%.lrc$") ~= nil
 end
 
+local function isNfp(name)
+  return type(name) == "string" and name:lower():match("%.nfp$") ~= nil
+end
+
 local function norm(s)
   s = tostring(s or ""):lower():gsub("_", " "):gsub("%s+", " ")
   return s:gsub("^%s+", ""):gsub("%s+$", "")
@@ -129,7 +138,10 @@ local function stripTrackNo(name)
 end
 
 local function songKeys(name)
-  local base = tostring(name or ""):gsub("%.[Ll][Rr][Cc]$", ""):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local base = tostring(name or "")
+    :gsub("%.[Ll][Rr][Cc]$", "")
+    :gsub("%.[Nn][Ff][Pp]$", "")
+    :gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
   local keys, seen = {}, {}
   local function add(v)
     local k = norm(v)
@@ -689,6 +701,68 @@ local function storeLrc(artist, folderName, fileName, data, batchPaths)
   return "ok", hit, beside, mirrored
 end
 
+local function storeNfp(artist, folderName, fileName, data, batchPaths)
+  local lower = fileName:lower()
+  local tracks = scanLibraryTracks()
+  local base = fileName:gsub("%.[Nn][Ff][Pp]$", "")
+  local isCover = lower == "cover.nfp" or lower == "album.nfp" or lower == "folder.nfp"
+
+  if isCover then
+    -- Place album cover in the session album folder (or first matching album).
+    local albumDir = nil
+    for _, d in ipairs(listDisks()) do
+      local cand = fs.combine(musicDir(d), folderName)
+      if fs.exists(cand) and fs.isDir(cand) then
+        albumDir = cand
+        break
+      end
+    end
+    if not albumDir and batchPaths and batchPaths[1] then
+      albumDir = fs.getDir(batchPaths[1].path)
+    end
+    if not albumDir then
+      return "miss", nil, folderName
+    end
+    local beside = fs.combine(albumDir, "cover.nfp")
+    if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
+      return "duplicate", nil, beside
+    end
+    local ok, err = writeBytes(beside, data)
+    if not ok then return "error", nil, tostring(err) end
+    return "ok", nil, beside
+  end
+
+  local hit = matchTrack(tracks, artist, folderName, base, nil, nil, batchPaths)
+  if not hit then
+    return "miss", nil, base
+  end
+
+  local nfpName = hit.base .. ".nfp"
+  local beside = fs.combine(fs.getDir(hit.path), nfpName)
+  if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
+    return "duplicate", hit, beside
+  end
+
+  local need = #data + CONFIG.reserve
+  local m = mountOf(hit.path)
+  local mpath = m == "" and "/" or m
+  if freeSpace(mpath) < need then
+    return "full", hit, beside
+  end
+
+  local ok, err = writeBytes(beside, data)
+  if not ok then
+    return "error", hit, tostring(err)
+  end
+
+  -- Seed album cover.nfp when missing so list thumbs still work.
+  local cover = fs.combine(fs.getDir(hit.path), "cover.nfp")
+  if not fs.exists(cover) then
+    writeBytes(cover, data)
+  end
+  return "ok", hit, beside
+end
+
 ------------------------------------------------------------------ dropped files
 local function handleDrop(files, artist, album)
   local folderName = folderFor(artist, album)
@@ -698,9 +772,10 @@ local function handleDrop(files, artist, album)
     return
   end
 
-  -- Pass 1: .dfpwm (so same-drop .lrc can land beside them)
+  -- Pass 1: .dfpwm (so same-drop .lrc/.nfp can land beside them)
   local batchAudio = {} -- { base, path, name }
   local pendingLrc = {}
+  local pendingNfp = {}
 
   for _, f in ipairs(list) do
     local name = safeName(f.getName())
@@ -722,7 +797,7 @@ local function handleDrop(files, artist, album)
           }
         elseif status == "duplicate" then
           say(name .. ": already on " .. d.mount .. ", skipped", colours.lightGrey)
-          -- Still usable as an .lrc target in this album
+          -- Still usable as an .lrc/.nfp target in this album
           local existing = fs.combine(fs.combine(musicDir(d), folderName), name)
           if fs.exists(existing) then
             batchAudio[#batchAudio + 1] = {
@@ -743,8 +818,16 @@ local function handleDrop(files, artist, album)
       else
         pendingLrc[#pendingLrc + 1] = { name = name, data = data }
       end
+    elseif lower:match("%.nfp$") then
+      local okRead, data = pcall(f.readAll)
+      if f.close then pcall(f.close) end
+      if not okRead or not data or #data == 0 then
+        say(name .. ": could not read .nfp, skipped", colours.red)
+      else
+        pendingNfp[#pendingNfp + 1] = { name = name, data = data }
+      end
     else
-      say(name .. ": not .dfpwm or .lrc, skipped", colours.orange)
+      say(name .. ": not .dfpwm / .lrc / .nfp, skipped", colours.orange)
       if f.close then pcall(f.close) end
     end
   end
@@ -770,6 +853,23 @@ local function handleDrop(files, artist, album)
       say(string.format("LRC matched %s but disk full for %s", hit and hit.base or "?", detail), colours.red)
     else
       say(string.format("LRC error: %s — %s", item.name, tostring(detail)), colours.red)
+    end
+  end
+
+  -- Pass 3: .nfp art beside matching .dfpwm (or cover.nfp for the album)
+  for _, item in ipairs(pendingNfp) do
+    local status, hit, detail = storeNfp(artist, folderName, item.name, item.data, batchAudio)
+    if status == "ok" then
+      say(string.format("NFP art: %s -> %s", item.name, detail), colours.lime)
+    elseif status == "duplicate" then
+      say(string.format("NFP already beside track: %s (%s)", detail, item.name), colours.lightGrey)
+    elseif status == "miss" then
+      say(string.format("NFP miss: %s (no .dfpwm for \"%s\")", item.name, tostring(detail)), colours.orange)
+      say("  Tip: import the song first, then drop Song.nfp / cover.nfp.", colours.lightGrey)
+    elseif status == "full" then
+      say(string.format("NFP matched %s but disk full for %s", hit and hit.base or "?", detail), colours.red)
+    else
+      say(string.format("NFP error: %s — %s", item.name, tostring(detail)), colours.red)
     end
   end
 end

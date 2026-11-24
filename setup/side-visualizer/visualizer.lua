@@ -135,6 +135,11 @@ if not mon then
 end
 
 pcall(mon.setTextScale, CONFIG.monitorScale)
+
+-- Appearance / mode from jukebox (jukebox_viz packet fields vizMode, accent, anim)
+local VIZ_MODE = "bars"  -- bars | wave | vu | off
+local VIZ_ANIM = true
+
 local W, H = mon.getSize()
 local lyricsModeActive = false
 
@@ -404,6 +409,8 @@ local function applyPacket(m)
   if type(m.pos) == "number" then RX.pos = m.pos end
   if type(m.dur) == "number" then RX.dur = m.dur end
   if m.lyricsOn ~= nil then RX.lyricsOn = m.lyricsOn and true or false end
+    if m.vizMode then VIZ_MODE = tostring(m.vizMode):lower() end
+    if m.anim ~= nil then VIZ_ANIM = not not m.anim end
   if type(m.lyric) == "string" then RX.lyric = m.lyric end
   RX.e = levelOf(m.e)
   RX.peak = levelOf(m.peak)
@@ -892,10 +899,12 @@ local function draw()
   end
 
   -- stage lights (corners + chase ticks)
-  drawStageLights(playing, DISP.e)
+  if VIZ_MODE ~= "off" then
+    drawStageLights(playing, DISP.e)
+  end
 
   -- center bloom (few cells, on hits / energy)
-  if playing and DISP.e > 0.22 then
+  if VIZ_MODE ~= "off" and playing and DISP.e > 0.22 then
     local cx, cy = math.floor(W / 2), math.floor(H / 2)
     local r = math.floor(1 + DISP.e * 3.2 + DISP.hit * 2.4 + DISP.bass * 1.2)
     local bloomCol = cycleCol(BLOOM_COLS, DISP.hue + DISP.bass)
@@ -956,7 +965,9 @@ local function draw()
     end
   end
 
+  -- MODE GATES: bars / wave / vu / off from jukebox APPEARANCE (VIZ_MODE set on packet)
   -- spectrum bars (with glow tips + peak caps)
+  if VIZ_MODE == "bars" or VIZ_MODE == "vu" then
   local gap = 1
   local totalGap = (displayBands - 1) * gap
   local barW = math.max(1, math.floor((W - 4 - totalGap) / displayBands))
@@ -1014,6 +1025,9 @@ local function draw()
     end
   end
 
+  end -- bars/vu
+
+  if VIZ_MODE == "wave" then
   -- mirrored waveform through the middle (thicker / dual-tone on energy)
   if playing or paused then
     mon.setBackgroundColor(BG)
@@ -1047,9 +1061,12 @@ local function draw()
       end
     end
   end
+  end -- wave
 
   -- particles
-  drawParticles(2, H - 1)
+  if VIZ_MODE ~= "off" then
+    drawParticles(2, H - 1)
+  end
 
   -- side label (dim chrome)
   mon.setBackgroundColor(BG)

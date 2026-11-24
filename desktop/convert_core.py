@@ -15,6 +15,7 @@ from typing import Callable
 
 from meta_parse import meta_from_path, safe_folder
 from name_sanitize import clean_stem_for_output
+from nfp_core import convert_art_for_track, find_cover_image
 
 AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".aac", ".webm", ".wma"}
 
@@ -217,11 +218,13 @@ def build_plan(
         seen[key] = src
         dst = folder / f"{title}.dfpwm"
         lrc_src = src.with_suffix(".lrc")
+        art_src = find_cover_image(src)
         plan.append(
             {
                 "src": src,
                 "dst": dst,
                 "lrc_src": lrc_src if lrc_src.is_file() else None,
+                "art_src": art_src,
                 "shown": dst.relative_to(out_root).as_posix(),
                 "note": "",
             }
@@ -371,7 +374,7 @@ def run_convert(
             if ok:
                 done += 1
                 total_bytes += info
-                # Keep .lrc beside the final .dfpwm (Artist/Album/Song.lrc)
+                # Keep .lrc + .nfp art beside the final .dfpwm (Artist/Album/Song.*)
                 lrc_src = it.get("lrc_src")
                 dst = it.get("dst")
                 if lrc_src and dst and Path(lrc_src).is_file():
@@ -384,6 +387,15 @@ def run_convert(
                             _log(f"  lrc {lrc_dst.relative_to(out_root).as_posix()}")
                     except OSError as e:
                         _log(f"  warn: could not copy lyrics: {e}")
+                if dst:
+                    convert_art_for_track(
+                        Path(it["src"]),
+                        Path(dst),
+                        size=16,
+                        overwrite=overwrite,
+                        ffmpeg=exe,
+                        log=_log,
+                    )
                 _log(f"  ok  {it['shown']}  ({info / 1048576:.2f} MB)")
                 _prog(
                     (done + failed) / total_todo,

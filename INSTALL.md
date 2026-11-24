@@ -2,8 +2,7 @@
 
 Paste-ready scripts live in this folder:
 
-- `jukebox.lua` — main computer (three-panel Artist | Album | Song UI + pocket listener + viz broadcaster). Same contents as `jukebox-three-panel.lua`.
-- `jukebox-three-panel.lua` — identical twin of `jukebox.lua` (keep both in sync when replacing)
+- `jukebox.lua` — main computer (**paintutils pixel UI**: album list + lyrics follow + APPEARANCE; pocket listener + viz broadcaster). Album/song art via beside `.nfp`.
 - `sfx/` — DJ transition stings (`SFX1.dfpwm` … `SFX4.dfpwm`); copy next to `jukebox.lua` on the main computer
 - `visualizer.lua` — left/right side-monitor music visualizer (rednet listener; **not** on the main 9×3); supports **LYRICS** big-text mode
 - `fetch-lyrics.md` — Windows LRCLIB fetch + Importer (new `.lrc`) / `sort-music` (bulk orphans)
@@ -12,14 +11,14 @@ Paste-ready scripts live in this folder:
 - `lyrics-status.lua` — quick count of tracks with/missing beside `.lrc`
 - `lyrics-import.lua` / `sort-lyrics.lua` — thin wrappers → `sort-music --lyrics-only`
 - `pocket.lua` — Pocket Advanced Computer remote
-- `Importer.lua` — drag-drop `.dfpwm` + `.lrc` (writes `music/<Artist - Album>/`; places matched `.lrc` beside songs)
+- `Importer.lua` — drag-drop `.dfpwm` + `.lrc` + `.nfp` art (writes `music/<Artist - Album>/`; places matched lyrics/art beside songs)
 
 Protocols:
 
 | Protocol | Who | Purpose |
 |----------|-----|---------|
 | **`pocket_mp3`** | Main ↔ Pocket | Library sync + remote transport |
-| **`jukebox_viz`** | Main → side PCs | Play state + energy / band / wave levels; optional `lyricsOn` + `lyric` line |
+| **`jukebox_viz`** | Main → side PCs | Play state + energy / band / wave levels; optional `lyricsOn` + `lyric`; `vizMode` (bars/wave/vu/off) + accent |
 
 Pocket and visualizers use **different** protocols on the same wireless network. Update main `jukebox.lua` when adding visualizers — older mains do not broadcast `jukebox_viz`.
 
@@ -40,9 +39,14 @@ Songs are `.dfpwm` files. Preferred tree (works on `disk`, `disk2`, … and `/mu
 
 ```text
 disk/Artist Name/Album Name/01 Song Title.dfpwm
+disk/Artist Name/Album Name/01 Song Title.lrc    (optional lyrics)
+disk/Artist Name/Album Name/01 Song Title.nfp    (optional song art)
+disk/Artist Name/Album Name/cover.nfp            (optional album art)
 disk/Artist Name/Album Name/02 Another Song.dfpwm
 disk2/Other Artist/Their Album/Track.dfpwm
 ```
+
+Desktop **Convert** / **Download** write `.nfp` from PNG/JPG (or embedded cover). Importer + `sort-music` keep `.nfp` beside matching `.dfpwm` under Artist/Album.
 
 Also accepted (common dump layout) — folder name is **`Artist - Album`** (split on the first ` - `):
 

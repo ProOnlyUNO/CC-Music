@@ -1,6 +1,7 @@
 --[[
   jukebox.lua — three-panel DFPWM jukebox for CC:Tweaked
-  Monitor layout: Artist | Album | Song  (designed for 9×3 at text scale 0.5)
+  Pixel UI (paintutils): library list + lyrics follow + APPEARANCE
+  Designed for 9×3 at text scale ~0.5–0.9; album art via beside .nfp
 
   Library (scanned on all attached disks + /music):
       disk/Artist/Album/*.dfpwm
@@ -152,7 +153,27 @@ local function naturalKey(s)
 end
 
 ------------------------------------------------------------------ settings
-local settings = { volume = 1.0, muted = false, shuffle = false, rep = "off", dj = false, lyrics = false }
+local ACCENTS = {
+  teal   = colors.lightBlue,
+  azure  = colors.blue,
+  amber  = colors.yellow,
+  rose   = colors.red,
+  violet = colors.purple,
+  lime   = colors.lime,
+  ice    = colors.white,
+  coral  = colors.orange,
+}
+local ACCENT_ORDER = { "teal", "azure", "amber", "rose", "violet", "lime", "ice", "coral" }
+local VIZ_MODES = { "bars", "wave", "vu", "off" }
+
+local settings = {
+  volume = 1.0, muted = false, shuffle = false, rep = "off", dj = false, lyrics = false,
+  lyricsFollow = true,
+  accent = "violet",
+  textScale = CONFIG.monitorScale,
+  animations = true,
+  vizMode = "bars",
+}
 
 local function loadSettings()
   if not fs.exists(CONFIG.settingsFile) then return end
@@ -167,8 +188,16 @@ local function loadSettings()
   if d.rep == "off" or d.rep == "all" or d.rep == "one" then settings.rep = d.rep end
   if type(d.dj) == "boolean" then settings.dj = d.dj end
   if type(d.lyrics) == "boolean" then settings.lyrics = d.lyrics end
+  if type(d.lyricsFollow) == "boolean" then settings.lyricsFollow = d.lyricsFollow end
+  if type(d.accent) == "string" and ACCENTS[d.accent] then settings.accent = d.accent end
+  if type(d.textScale) == "number" then settings.textScale = clamp(d.textScale, 0.5, 5) end
+  if type(d.animations) == "boolean" then settings.animations = d.animations end
+  if type(d.vizMode) == "string" then
+    for _, m in ipairs(VIZ_MODES) do if m == d.vizMode then settings.vizMode = d.vizMode break end end
+  end
 end
 loadSettings()
+CONFIG.monitorScale = settings.textScale or CONFIG.monitorScale
 
 ------------------------------------------------------------------ library  (Artist → Album → tracks)
 -- artists = { { name, albums = { { name, tracks = { path,title,album,artist,dur,key } } } } }
@@ -574,6 +603,11 @@ local function saveSettings()
   f.write(textutils.serialize({
     volume = S.volume, muted = S.muted, shuffle = S.shuffle, rep = S.rep, dj = S.dj,
     lyrics = S.lyrics,
+    lyricsFollow = settings.lyricsFollow,
+    accent = settings.accent,
+    textScale = settings.textScale,
+    animations = settings.animations,
+    vizMode = settings.vizMode,
   }))
   f.close()
 end
@@ -1285,88 +1319,93 @@ local function selectAlbum(idx)
   scroll.songs = 0
 end
 
------------------------------------------------------------------- display
+------------------------------------------------------------------ display (paintutils pixel UI)
 local mon, monName
 if not forceTerm then
   local m = peripheral.find("monitor")
   if m then
     mon, monName = m, peripheral.getName(m)
-    mon.setTextScale(clamp(CONFIG.monitorScale, 0.5, 5))
+    mon.setTextScale(clamp(settings.textScale or CONFIG.monitorScale, 0.5, 5))
   end
 end
 local T = mon or term.current()
 local isColor = T.isColor and T.isColor()
 
+local function accentColor()
+  return ACCENTS[settings.accent] or colors.purple
+end
+
+local function rebuildPalette()
+  local ac = accentColor()
+  if isColor then
+    P = {
+      bg = colors.black, fg = colors.white, dim = colors.lightGray,
+      panel = colors.gray, muted = colors.gray,
+      accent = ac, accentFg = colors.black,
+      hdrBg = colors.black, hdrFg = colors.white,
+      selBg = ac, selFg = colors.black,
+      play = ac, on = ac, off = colors.lightGray,
+      barOn = ac, barOff = colors.gray,
+      npBg = colors.gray, npFg = colors.white,
+      navBg = colors.gray, navFg = colors.lightGray, navOn = ac,
+      credit = colors.red,
+    }
+  else
+    P = {
+      bg = colors.black, fg = colors.white, dim = colors.lightGray,
+      panel = colors.gray, muted = colors.gray,
+      accent = colors.white, accentFg = colors.black,
+      hdrBg = colors.black, hdrFg = colors.white,
+      selBg = colors.white, selFg = colors.black,
+      play = colors.white, on = colors.white, off = colors.lightGray,
+      barOn = colors.white, barOff = colors.gray,
+      npBg = colors.gray, npFg = colors.white,
+      navBg = colors.gray, navFg = colors.lightGray, navOn = colors.white,
+      credit = colors.white,
+    }
+  end
+end
 local P
-if isColor then
-  P = {
-    bg = colors.black, fg = colors.white, dim = colors.lightGray,
-    hdrBg = colors.blue, hdrFg = colors.white,
-    paneBg = colors.gray, paneFg = colors.yellow,
-    focusBg = colors.cyan, focusFg = colors.black,
-    selBg = colors.lightBlue, selFg = colors.black,
-    play = colors.lime, on = colors.lime, off = colors.lightGray,
-    barOn = colors.lime, barOff = colors.gray,
-    vLow = colors.lime, vMid = colors.yellow, vHigh = colors.red,
-    thumb = colors.lightGray, track = colors.gray,
-    accent = colors.magenta, npBg = colors.gray, npFg = colors.white,
-  }
-else
-  P = {
-    bg = colors.black, fg = colors.white, dim = colors.lightGray,
-    hdrBg = colors.gray, hdrFg = colors.white,
-    paneBg = colors.gray, paneFg = colors.white,
-    focusBg = colors.white, focusFg = colors.black,
-    selBg = colors.white, selFg = colors.black,
-    play = colors.white, on = colors.white, off = colors.lightGray,
-    barOn = colors.white, barOff = colors.gray,
-    vLow = colors.white, vMid = colors.white, vHigh = colors.white,
-    thumb = colors.white, track = colors.gray,
-    accent = colors.white, npBg = colors.gray, npFg = colors.white,
-  }
-end
-
--- Bright CC palette spread for A–Z tints + rainbow now-playing (skip black/gray)
-local RAINBOW = isColor and {
-  colors.red, colors.orange, colors.yellow, colors.lime,
-  colors.green, colors.cyan, colors.lightBlue, colors.blue,
-  colors.purple, colors.magenta, colors.pink,
-} or { colors.white }
-
-local function letterTint(name)
-  if not isColor or not name or name == "" then return P.fg end
-  local ch = name:match("%a")
-  if not ch then return P.accent end
-  local idx = string.byte(ch:upper()) - string.byte("A")  -- 0..25
-  return RAINBOW[(idx % #RAINBOW) + 1]
-end
-
-local function rainbowPhase()
-  -- advances ~2 steps per UI tick (0.5s) so the strip visibly cycles
-  return math.floor(now() * 4) % #RAINBOW
-end
+rebuildPalette()
 
 local W, H = T.getSize()
 local D = window.create(T, 1, 1, W, H, true)
 D.setCursorBlink(false)
 
-local L = {}
+-- UI navigation (friend-style bottom tabs)
+local ui = {
+  tab = "library",          -- home | music | library | search | playlists | lyrics | appearance
+  browse = "tracks",        -- artists | albums | tracks
+  search = "",
+  listScroll = 0,
+  lyricScroll = 0,
+  animPhase = 0,
+}
 local hits = {}
+local artCache = {}
 
-local function layout()
-  -- three equal-ish panels; leave room for scrollbars + separators
-  local usable = W - 4   -- 2 separators + 2? actually 2 seps between 3 panes
-  L.aw = math.max(10, math.floor(usable * 0.28))
-  L.bw = math.max(10, math.floor(usable * 0.32))
-  L.cw = math.max(12, W - L.aw - L.bw - 2)
-  L.ax = 1
-  L.bx = L.aw + 2
-  L.cx = L.bx + L.bw + 1
-  L.top = 3
-  L.bot = H - 5
-  L.rows = math.max(1, L.bot - L.top + 1)
+local NAV = {
+  { id = "home", label = "HOME" },
+  { id = "music", label = "MUSIC" },
+  { id = "library", label = "LIBRARY" },
+  { id = "search", label = "SEARCH" },
+  { id = "playlists", label = "PLAYLISTS" },
+  { id = "lyrics", label = "LYRICS" },
+}
+
+local function withTerm(fn)
+  local old = term.redirect(D)
+  local ok, err = pcall(fn)
+  term.redirect(old)
+  if not ok then error(err, 0) end
 end
-layout()
+
+local function fill(x1, y1, x2, y2, col)
+  if x2 < x1 or y2 < y1 then return end
+  withTerm(function()
+    paintutils.drawFilledBox(x1, y1, x2, y2, col or P.bg)
+  end)
+end
 
 local function put(x, y, s, fg, bg)
   if fg then D.setTextColor(fg) end
@@ -1375,85 +1414,438 @@ local function put(x, y, s, fg, bg)
   D.write(s)
 end
 
--- Per-character rainbow (animated via rainbowPhase on each redraw)
-local function putRainbow(x, y, s, bg)
-  if not isColor then
-    put(x, y, s, P.play, bg)
-    return
-  end
-  D.setBackgroundColor(bg or P.npBg)
-  local n = #RAINBOW
-  local phase = rainbowPhase()
-  for i = 1, #s do
-    D.setTextColor(RAINBOW[((i - 1 + phase) % n) + 1])
-    D.setCursorPos(x + i - 1, y)
-    D.write(s:sub(i, i))
-  end
+local function putFit(x, y, s, w, fg, bg)
+  put(x, y, fit(tostring(s or ""), w), fg, bg)
 end
 
 local function addHit(x1, x2, y, fn, drag)
   hits[#hits + 1] = { x1 = x1, x2 = x2, y = y, fn = fn, drag = drag }
 end
 
-local function clampScrolls()
-  local ar = currentArtist()
-  local nAlb = ar and #ar.albums or 0
+local function pill(x, y, w, label, on, fn)
+  local bg = on and P.accent or P.panel
+  local fg = on and P.accentFg or P.fg
+  fill(x, y, x + w - 1, y, bg)
+  putFit(x, y, " " .. label, w, fg, bg)
+  if fn then addHit(x, x + w - 1, y, fn) end
+end
+
+local function artPathFor(track)
+  if not track or not track.path then return nil end
+  local dir = fs.getDir(track.path)
+  local base = fs.getName(track.path):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local song = fs.combine(dir, base .. ".nfp")
+  if fs.exists(song) and not fs.isDir(song) then return song end
+  for _, name in ipairs({ "cover.nfp", "album.nfp", "folder.nfp" }) do
+    local p = fs.combine(dir, name)
+    if fs.exists(p) and not fs.isDir(p) then return p end
+  end
+  return nil
+end
+
+local function loadArt(path)
+  if not path then return nil end
+  local cached = artCache[path]
+  if cached ~= nil then return cached or nil end
+  local ok, img = pcall(paintutils.loadImage, path)
+  artCache[path] = (ok and img) or false
+  return artCache[path] or nil
+end
+
+local function drawArt(x, y, track, size)
+  size = size or 3
+  fill(x, y, x + size - 1, y + size - 1, P.panel)
+  local img = loadArt(artPathFor(track))
+  if img then
+    withTerm(function()
+      paintutils.drawImage(img, x, y)
+    end)
+  else
+    -- placeholder square
+    put(x + math.floor(size / 2), y + math.floor(size / 2), "?", P.dim, P.panel)
+  end
+end
+
+local function applyTextScale(scale)
+  scale = clamp(tonumber(scale) or CONFIG.monitorScale, 0.5, 5)
+  settings.textScale = math.floor(scale * 10 + 0.5) / 10
+  CONFIG.monitorScale = settings.textScale
+  if mon then
+    mon.setTextScale(settings.textScale)
+    W, H = T.getSize()
+    D.reposition(1, 1, W, H)
+  end
+  S.dirty = true
+  setStatus(string.format("Text scale %.1f", settings.textScale))
+end
+
+local function setAccent(name)
+  if not ACCENTS[name] then return end
+  settings.accent = name
+  rebuildPalette()
+  S.dirty = true
+  S.vizDirty = true
+  setStatus("Accent: " .. name)
+end
+
+local function setVizMode(mode)
+  for _, m in ipairs(VIZ_MODES) do
+    if m == mode then
+      settings.vizMode = mode
+      S.dirty = true
+      S.vizDirty = true
+      setStatus("Visualizer: " .. mode:upper())
+      return
+    end
+  end
+end
+
+local function setTab(id)
+  ui.tab = id
+  if id == "lyrics" then
+    if not S.lyrics then toggleLyrics() end
+  elseif id == "library" or id == "music" then
+    ui.browse = "tracks"
+  elseif id == "playlists" then
+    -- jump to library All Songs
+    if artists[1] and artists[1].virtual then
+      selectArtist(1)
+      selectAlbum(1)
+    end
+    ui.browse = "tracks"
+    ui.tab = "library"
+  end
+end
+
+local function contentTop()
+  return 3
+end
+
+local function contentBot()
+  return math.max(contentTop(), H - 4)
+end
+
+local function rowH()
+  return 3
+end
+
+local function visibleRows()
+  return math.max(1, math.floor((contentBot() - contentTop() + 1) / rowH()))
+end
+
+local function filteredTracks()
   local al = currentAlbum()
-  local nSongs = al and #al.tracks or 0
-  scroll.artists = clamp(scroll.artists, 0, math.max(0, #artists - L.rows))
-  scroll.albums  = clamp(scroll.albums,  0, math.max(0, nAlb - L.rows))
-  scroll.songs   = clamp(scroll.songs,   0, math.max(0, nSongs - L.rows))
+  local tracks = al and al.tracks or {}
+  local q = (ui.search or ""):lower()
+  if ui.tab ~= "search" or q == "" then return tracks end
+  local out = {}
+  for _, t in ipairs(tracks) do
+    local hay = (t.title .. " " .. t.artist .. " " .. t.album):lower()
+    if hay:find(q, 1, true) then out[#out + 1] = t end
+  end
+  return out
 end
 
-local function drawScrollbar(x, total, sc)
-  for r = 0, L.rows - 1 do put(x, L.top + r, " ", P.fg, P.bg) end
-  if total > L.rows then
-    local th = math.max(1, math.floor(L.rows * L.rows / total))
-    local tp = math.floor(sc / (total - L.rows) * (L.rows - th) + 0.5)
-    for r = 0, L.rows - 1 do
-      local isThumb = r >= tp and r < tp + th
-      put(x, L.top + r, isThumb and "\127" or "\149", isThumb and P.thumb or P.track, P.bg)
-    end
+local function drawHeader(title, right)
+  fill(1, 1, W, 2, P.bg)
+  putFit(2, 1, title or "", math.max(8, W - 28), P.fg, P.bg)
+  local credit = "ProOnlyUNO"
+  put(W - #credit, 1, credit, P.credit, P.bg)
+  if right and right ~= "" then
+    putFit(2, 2, right, W - 2, P.dim, P.bg)
   end
 end
 
-local function drawButtons(y)
-  put(1, y, string.rep(" ", W), P.fg, P.bg)
+local function drawBottomNav()
+  local y = H - 1
+  fill(1, y, W, H, P.navBg)
+  local n = #NAV
+  local slot = math.max(6, math.floor(W / n))
+  local x = 1
+  for _, tab in ipairs(NAV) do
+    local on = ui.tab == tab.id or (tab.id == "playlists" and ui.tab == "library" and currentAlbum() and currentAlbum().virtual)
+    local fg = on and P.navOn or P.navFg
+    putFit(x, y, tab.label, slot - 1, fg, P.navBg)
+    addHit(x, x + slot - 2, y, function() setTab(tab.id) end)
+    x = x + slot
+  end
+  -- gear → appearance (top-right alternative also)
+  put(W - 3, y, "CFG", P.accent, P.navBg)
+  addHit(W - 3, W, y, function() setTab("appearance") end)
+end
+
+local function drawTransport()
+  local y = H - 2
+  fill(1, y, W, y, P.bg)
   local playing = S.cur and not S.paused
-  local items = {
-    { label = "[<<]", fg = P.fg, fn = prevTrack },
-    { label = playing and "[PAUSE]" or "[PLAY]", fg = P.play, fn = function()
-        if not togglePause() and not S.cur then
-          local al = currentAlbum()
-          if al then playAlbum(al, selSong) else playAllFrom(1) end
+  local cx = math.floor(W / 2)
+  -- -10 / pause / +10
+  pill(cx - 10, y, 5, "-10", false, function() seekTo(position() - CONFIG.seekStep) end)
+  local pLab = playing and " || " or " >  "
+  pill(cx - 3, y, 6, pLab, true, function()
+    if not togglePause() and not S.cur then
+      local al = currentAlbum()
+      if al then playAlbum(al, selSong) else playAllFrom(1) end
+    end
+  end)
+  pill(cx + 4, y, 5, "+10", false, function() seekTo(position() + CONFIG.seekStep) end)
+  -- prev / next near right
+  put(W - 11, y, "<<", P.fg, P.bg)
+  put(W - 7, y, ">>", P.fg, P.bg)
+  addHit(W - 11, W - 10, y, prevTrack)
+  addHit(W - 7, W - 6, y, function() if S.cur then advance(1, false) end end)
+end
+
+local function drawTrackList()
+  local tracks = filteredTracks()
+  local rh = rowH()
+  local rows = visibleRows()
+  local top = contentTop()
+  ui.listScroll = clamp(ui.listScroll, 0, math.max(0, #tracks - rows))
+  local ar = currentArtist()
+  local al = currentAlbum()
+  local hdr = (al and al.name) or (ar and ar.name) or "LIBRARY"
+  drawHeader(hdr:upper(), diskSpace.label ~= "" and diskSpace.label or "CC Music")
+
+  -- breadcrumb controls
+  put(2, 2, "[ARTISTS]", P.dim, P.bg)
+  addHit(2, 10, 2, function() ui.browse = "artists"; ui.listScroll = 0 end)
+  put(12, 2, "[ALBUMS]", P.dim, P.bg)
+  addHit(12, 19, 2, function() ui.browse = "albums"; ui.listScroll = 0 end)
+  put(21, 2, "[TRACKS]", P.accent, P.bg)
+  addHit(21, 28, 2, function() ui.browse = "tracks"; ui.listScroll = 0 end)
+
+  if ui.browse == "artists" then
+    for r = 0, rows - 1 do
+      local idx = ui.listScroll + r + 1
+      local a = artists[idx]
+      local y = top + r * rh
+      if a then
+        local sel = idx == selArtist
+        local bg = sel and P.selBg or P.bg
+        local fg = sel and P.selFg or P.fg
+        fill(1, y, W, y + rh - 2, bg)
+        putFit(3, y, a.name, W - 6, fg, bg)
+        addHit(1, W, y, function()
+          selectArtist(idx)
+          ui.browse = "albums"
+          ui.listScroll = 0
+        end)
+        addHit(1, W, y + 1, function()
+          selectArtist(idx)
+          ui.browse = "albums"
+          ui.listScroll = 0
+        end)
+      end
+    end
+    return
+  end
+
+  if ui.browse == "albums" then
+    local albums = ar and ar.albums or {}
+    for r = 0, rows - 1 do
+      local idx = ui.listScroll + r + 1
+      local a = albums[idx]
+      local y = top + r * rh
+      if a then
+        local sel = idx == selAlbum
+        local bg = sel and P.selBg or P.bg
+        local fg = sel and P.selFg or P.fg
+        fill(1, y, W, y + rh - 2, bg)
+        local sample = a.tracks and a.tracks[1]
+        if sample then drawArt(2, y, sample, 2) end
+        putFit(5, y, a.name, W - 8, fg, bg)
+        putFit(5, y + 1, tostring(#(a.tracks or {})) .. " tracks", W - 8, sel and P.selFg or P.dim, bg)
+        addHit(1, W, y, function()
+          selectAlbum(idx)
+          ui.browse = "tracks"
+          ui.listScroll = 0
+        end)
+        addHit(1, W, y + 1, function()
+          selectAlbum(idx)
+          ui.browse = "tracks"
+          ui.listScroll = 0
+        end)
+      end
+    end
+    return
+  end
+
+  -- tracks (friend album-list look)
+  for r = 0, rows - 1 do
+    local idx = ui.listScroll + r + 1
+    local t = tracks[idx]
+    local y = top + r * rh
+    if t then
+      local sel = (al and al.tracks[selSong] and al.tracks[selSong].path == t.path)
+        or (S.cur and S.cur.path == t.path)
+      local bg = sel and P.selBg or P.bg
+      local fg = sel and P.selFg or P.fg
+      fill(1, y, W - 1, y + rh - 2, bg)
+      drawArt(2, y, t, 2)
+      local titleW = math.max(8, W - 14)
+      putFit(5, y, t.title, titleW, fg, bg)
+      putFit(5, y + 1, t.artist or "", titleW, sel and P.selFg or P.dim, bg)
+      local dur = rjust(fmt(t.dur), 5)
+      put(W - 6, y, dur, sel and P.selFg or P.dim, bg)
+      if trackHasLyrics(t) then
+        put(W - 8, y + 1, "L", P.accent, bg)
+      end
+      addHit(1, W - 1, y, function()
+        -- map filtered idx back if searching
+        if ui.tab == "search" and (ui.search or "") ~= "" then
+          for i, tr in ipairs(al.tracks) do
+            if tr.path == t.path then selSong = i; playAlbum(al, i); return end
+          end
+        else
+          selSong = idx
+          playAlbum(al, idx)
         end
-      end },
-    { label = "[>>]", fg = P.fg, fn = function() if S.cur then advance(1, false) end end },
-    { label = "[STOP]", fg = P.fg, fn = stopPlayback },
-    { label = "[SHUF]", fg = S.shuffle and P.on or P.off, fn = toggleShuffle },
-    { label = (S.rep == "off" and "[RPT]") or (S.rep == "all" and "[RPT:ALL]") or "[RPT:1]",
-      fg = S.rep ~= "off" and P.on or P.off, fn = cycleRepeat },
-    { label = "[DJ]", fg = S.dj and P.on or P.off, fn = toggleDj },
-    { label = "[LYRICS]", fg = S.lyrics and P.on or P.off, fn = toggleLyrics },
-    { label = "[MUTE]", fg = S.muted and P.on or P.off, fn = toggleMute },
-    { label = "[-" .. CONFIG.seekStep .. "s]", fg = P.fg, fn = function() seekTo(position() - CONFIG.seekStep) end },
-    { label = "[+" .. CONFIG.seekStep .. "s]", fg = P.fg, fn = function() seekTo(position() + CONFIG.seekStep) end },
-  }
-  local x = 2
-  for _, it in ipairs(items) do
-    local w = #it.label
-    if x + w - 1 <= W - 1 then
-      put(x, y, it.label, it.fg, P.bg)
-      addHit(x, x + w - 1, y, it.fn)
-      x = x + w + 1
+      end)
+      addHit(1, W - 1, y + 1, function()
+        if ui.tab == "search" and (ui.search or "") ~= "" then
+          for i, tr in ipairs(al.tracks) do
+            if tr.path == t.path then selSong = i; playAlbum(al, i); return end
+          end
+        else
+          selSong = idx
+          playAlbum(al, idx)
+        end
+      end)
+    end
+  end
+  -- scrollbar
+  if #tracks > rows then
+    local th = math.max(1, math.floor(rows * rows / #tracks))
+    local tp = math.floor(ui.listScroll / math.max(1, #tracks - rows) * (rows - th) + 0.5)
+    for r = 0, rows - 1 do
+      local y = top + r * rh
+      local on = r >= tp and r < tp + th
+      fill(W, y, W, y + rh - 2, on and P.accent or P.panel)
     end
   end
 end
 
-local function paneHeader(x, w, label, focused)
-  local bg = focused and P.focusBg or P.paneBg
-  local fg = focused and P.focusFg or P.paneFg
-  put(x, 2, fit(" " .. label, w), fg, bg)
+local function drawHome()
+  drawHeader("CC MUSIC", "Developer: ProOnlyUNO")
+  local t = S.cur
+  if t then
+    drawArt(3, 4, t, 8)
+    putFit(13, 4, t.title, W - 14, P.fg, P.bg)
+    putFit(13, 5, t.artist, W - 14, P.dim, P.bg)
+    putFit(13, 6, t.album, W - 14, P.dim, P.bg)
+    local pos, dur = position(), t.dur or 0
+    putFit(13, 8, fmt(pos) .. " / " .. fmt(dur), W - 14, P.accent, P.bg)
+    local barX1, barX2 = 13, W - 2
+    local filled = (dur > 0) and clamp(math.floor(pos / dur * (barX2 - barX1 + 1) + 0.5), 0, barX2 - barX1 + 1) or 0
+    fill(barX1, 9, barX2, 9, P.panel)
+    if filled > 0 then fill(barX1, 9, barX1 + filled - 1, 9, P.accent) end
+    addHit(barX1, barX2, 9, function(x)
+      seekTo((x - barX1) / math.max(1, barX2 - barX1) * dur)
+    end)
+  else
+    put(3, 5, "Nothing playing — open LIBRARY", P.dim, P.bg)
+  end
+  put(3, 12, "Animations: " .. (settings.animations and "ON" or "OFF"), P.dim, P.bg)
+  put(3, 13, "Viz: " .. string.upper(settings.vizMode or "bars"), P.accent, P.bg)
+end
+
+local function drawLyricsView()
+  local t = S.cur
+  drawHeader("LYRICS", t and (t.title .. "  ·  " .. t.artist) or "No track")
+  -- SYNCED LRC + FOLLOW
+  local synced = t and S.lyricLines and #S.lyricLines > 0
+  put(W - 18, 1, synced and "SYNCED LRC" or "NO LRC", synced and P.accent or P.dim, P.bg)
+  pill(W - 12, 2, 10, settings.lyricsFollow and "FOLLOW" or "MANUAL", settings.lyricsFollow, function()
+    settings.lyricsFollow = not settings.lyricsFollow
+    S.dirty = true
+  end)
+
+  local lines = S.lyricLines or {}
+  local curIdx = S.lyricIdx or 1
+  local top = contentTop()
+  local bot = contentBot()
+  local rows = math.max(1, bot - top + 1)
+  if settings.lyricsFollow and synced then
+    ui.lyricScroll = clamp(curIdx - math.floor(rows / 2), 0, math.max(0, #lines - rows))
+  end
+  ui.lyricScroll = clamp(ui.lyricScroll, 0, math.max(0, #lines - rows))
+
+  if #lines == 0 then
+    put(3, top + 1, "No synced lyrics for this track.", P.dim, P.bg)
+    put(3, top + 2, "Drop a matching .lrc beside the .dfpwm.", P.dim, P.bg)
+  else
+    for r = 0, rows - 1 do
+      local idx = ui.lyricScroll + r + 1
+      local line = lines[idx]
+      local y = top + r
+      if line then
+        local active = idx == curIdx
+        local bg = active and P.selBg or P.bg
+        local fg = active and P.selFg or P.fg
+        fill(1, y, W, y, bg)
+        local text = type(line) == "table" and (line.text or "") or tostring(line)
+        putFit(2, y, text, W - 2, fg, bg)
+      end
+    end
+  end
+end
+
+local function drawAppearance()
+  drawHeader("< APPEARANCE", "Palette changes apply live")
+  put(2, 1, "<", P.fg, P.bg)
+  addHit(1, 3, 1, function() setTab("library") end)
+
+  put(2, 3, "ACCENT COLOUR", P.fg, P.bg)
+  local x, y = 2, 5
+  for i, name in ipairs(ACCENT_ORDER) do
+    local on = settings.accent == name
+    local col = ACCENTS[name]
+    fill(x, y, x + 10, y, on and col or P.panel)
+    putFit(x, y, " " .. name:upper(), 11, on and colors.black or P.fg, on and col or P.panel)
+    if on then fill(x, y + 1, x + 10, y + 1, colors.white) end
+    addHit(x, x + 10, y, function() setAccent(name) end)
+    x = x + 13
+    if x + 11 > W then
+      x = 2
+      y = y + 3
+    end
+  end
+
+  y = y + 3
+  put(2, y, "INTERFACE", P.fg, P.bg)
+  y = y + 2
+  put(2, y, "Text scale", P.fg, P.bg)
+  put(2, y + 1, "Text scale applies to the whole interface. Use 0.1 steps.", P.dim, P.bg)
+  local scaleStr = string.format("%.1f", settings.textScale or 0.5)
+  put(W - 16, y, scaleStr, P.accent, P.bg)
+  pill(W - 12, y, 3, "-", false, function() applyTextScale((settings.textScale or 0.5) - 0.1) end)
+  pill(W - 8, y, 3, "+", false, function() applyTextScale((settings.textScale or 0.5) + 0.1) end)
+
+  y = y + 3
+  put(2, y, "Animations", P.fg, P.bg)
+  pill(W - 10, y, 8, settings.animations and "ON" or "OFF", settings.animations, function()
+    settings.animations = not settings.animations
+    S.dirty = true
+  end)
+
+  y = y + 3
+  put(2, y, "VISUALIZER (REAL PCM ANALYSIS)", P.fg, P.bg)
+  put(2, y + 1, "Palette changes are applied live to this monitor.", P.dim, P.bg)
+  y = y + 3
+  x = 2
+  for _, mode in ipairs(VIZ_MODES) do
+    local on = settings.vizMode == mode
+    pill(x, y, 8, mode:upper(), on, function() setVizMode(mode) end)
+    x = x + 10
+  end
+end
+
+local function drawSearch()
+  drawHeader("SEARCH", "Type to filter current album (keyboard)")
+  put(2, 3, "Query: " .. (ui.search or "") .. "_", P.fg, P.bg)
+  ui.tab = "search"
+  drawTrackList()
 end
 
 local function draw()
@@ -1461,216 +1853,43 @@ local function draw()
   hits = {}
   D.setBackgroundColor(P.bg)
   D.clear()
+  if settings.animations then
+    ui.animPhase = (ui.animPhase + 1) % 64
+  end
 
-  if W < 40 or H < 12 then
-    put(1, 1, "Screen too small for three-panel UI", P.fg, P.bg)
-    put(1, 2, "Need ~40x12+. Try --scale=0.5 on a 9x3 monitor.", P.dim, P.bg)
+  if W < 30 or H < 12 then
+    put(1, 1, "Screen too small", P.fg, P.bg)
+    put(1, 2, "Need larger monitor / lower --scale", P.dim, P.bg)
     D.setVisible(true)
     return
   end
 
-  clampScrolls()
-  local ar = currentArtist()
-  local al = currentAlbum()
-
-  -- title bar
-  local nArtists, nAlbums = 0, 0
-  for _, a in ipairs(artists) do
-    if not a.virtual then
-      nArtists = nArtists + 1
-      for _, al in ipairs(a.albums) do
-        if not al.virtual then nAlbums = nAlbums + 1 end
-      end
-    end
-  end
-  local space = diskSpace.label ~= "" and ("  " .. diskSpace.label) or ""
-  local title = string.format(" DFPWM JUKEBOX  -  %d artists  -  %d albums  -  %d songs  -  %d spk",
-    nArtists, nAlbums, #allTracks, #speakers)
-  -- Left: library summary; mid-right: developer credit; right: disk used/free (~4s)
-  -- Credit: single colors.red write (no +1 offset faux-bold — that made UNO look like UNO0).
-  local dev = "Developer: ProOnlyUNO"
-  local gap = 2
-  local spaceGap = (#space > 0) and gap or 0
-  local rightBits = #space + spaceGap + #dev + gap
-  put(1, 1, string.rep(" ", W), P.hdrFg, P.hdrBg)
-  if W > rightBits + 16 then
-    local titleW = W - rightBits
-    put(1, 1, fit(title, titleW), P.hdrFg, P.hdrBg)
-    local devX = titleW + gap + 1
-    local devFg = isColor and colors.red or P.hdrFg
-    put(devX, 1, dev, devFg, P.hdrBg)
-    if #space > 0 then
-      put(W - #space + 1, 1, fit(space, #space), P.hdrFg, P.hdrBg)
-    end
-  elseif #space > 0 and W > #space + 20 then
-    put(1, 1, fit(title, W - #space), P.hdrFg, P.hdrBg)
-    put(W - #space + 1, 1, fit(space, #space), P.hdrFg, P.hdrBg)
+  if ui.tab == "appearance" then
+    drawAppearance()
+  elseif ui.tab == "lyrics" then
+    drawLyricsView()
+    drawTransport()
+  elseif ui.tab == "home" then
+    drawHome()
+    drawTransport()
+  elseif ui.tab == "search" then
+    -- search uses track list body
+    local keep = ui.search
+    drawHeader("SEARCH", "Filter: " .. (keep ~= "" and keep or "(all)"))
+    drawTrackList()
+    drawTransport()
   else
-    put(1, 1, fit(title .. space, W), P.hdrFg, P.hdrBg)
+    drawTrackList()
+    drawTransport()
   end
 
-  -- pane headers
-  paneHeader(L.ax, L.aw, "ARTIST", focus == "artists")
-  paneHeader(L.bx, L.bw, ar and ("ALBUM - " .. ar.name) or "ALBUM", focus == "albums")
-  local songHdr = al and ("SONG - " .. al.name .. " (" .. #al.tracks .. ")") or "SONG"
-  paneHeader(L.cx, L.cw - 12, songHdr, focus == "songs")
-  local playX = L.cx + L.cw - 12
-  put(playX, 2, fit("[Play][Shuf]", 12), P.fg, focus == "songs" and P.focusBg or P.paneBg)
-  addHit(playX, playX + 5, 2, function()
-    if al then playAlbum(al, nil) end
-  end)
-  addHit(playX + 6, playX + 11, 2, function()
-    if not S.shuffle then S.shuffle = true; S.dirty = true end
-    if al then playAlbum(al, nil) end
-  end)
-
-  -- vertical separators
-  for y = 3, L.bot do
-    put(L.aw + 1, y, "\149", P.track, P.bg)
-    put(L.bx + L.bw, y, "\149", P.track, P.bg)
+  if ui.tab ~= "appearance" then
+    drawBottomNav()
   end
 
-  -- ARTISTS  (idx 1 may be synthetic library "All Songs"; rows tinted by first letter)
-  for r = 0, L.rows - 1 do
-    local y = L.top + r
-    local idx = scroll.artists + r + 1
-    local a = artists[idx]
-    if a then
-      local selected = idx == selArtist
-      local playing
-      local libAll = S.src and S.src.virtual and S.src.artist == "All Songs"
-      if a.virtual then
-        playing = S.cur and libAll
-      else
-        playing = S.cur and S.cur.artist == a.name and not libAll
-      end
-      local bg = selected and (focus == "artists" and P.focusBg or P.selBg) or P.bg
-      local fg = selected and (focus == "artists" and P.focusFg or P.selFg)
-        or (playing and P.play or letterTint(a.name))
-      local mark = playing and ">" or " "
-      put(L.ax, y, fit(mark .. a.name, L.aw - 1), fg, bg)
-    end
-  end
-  drawScrollbar(L.aw, #artists, scroll.artists)
-
-  -- ALBUMS  (idx 1 may be per-artist synthetic "All Songs")
-  local albums = ar and ar.albums or {}
-  for r = 0, L.rows - 1 do
-    local y = L.top + r
-    local idx = scroll.albums + r + 1
-    local a = albums[idx]
-    if a then
-      local selected = idx == selAlbum
-      local playing
-      if a.virtual then
-        playing = S.cur and S.src and S.src.virtual
-          and S.src.artist == a.artist and S.src.name == a.name
-      else
-        playing = S.cur and S.src and not S.src.virtual
-          and S.src.name == a.name and S.cur.artist == a.artist
-      end
-      local bg = selected and (focus == "albums" and P.focusBg or P.selBg) or P.bg
-      local fg = selected and (focus == "albums" and P.focusFg or P.selFg)
-        or (playing and P.play or letterTint(a.name))
-      local mark = playing and ">" or " "
-      put(L.bx, y, fit(mark .. a.name, L.bw - 1), fg, bg)
-    end
-  end
-  drawScrollbar(L.bx + L.bw - 1, #albums, scroll.albums)
-
-  -- SONGS  (library All Songs: artist - title; artist All Songs: album - title)
-  local tracks = al and al.tracks or {}
-  local tw = L.cw - 1 - 6
-  local allMode = al and al.virtual
-  local libAllMode = allMode and al.artist == "All Songs"
-  for r = 0, L.rows - 1 do
-    local y = L.top + r
-    local idx = scroll.songs + r + 1
-    local t = tracks[idx]
-    if t then
-      local selected = idx == selSong
-      local playing = S.cur and S.cur.path == t.path
-      local bg = selected and (focus == "songs" and P.focusBg or P.selBg) or P.bg
-      local tintName = libAllMode and t.artist or (allMode and t.album or t.title)
-      local fg = selected and (focus == "songs" and P.focusFg or P.selFg)
-        or (playing and P.play or letterTint(tintName))
-      local mark = playing and ">" or " "
-      local label
-      if libAllMode then
-        label = t.artist .. " - " .. t.title
-      elseif allMode then
-        label = t.album .. " - " .. t.title
-      else
-        label = t.title
-      end
-      local lrcMark = trackHasLyrics(t) and " (L)" or ""
-      -- keep " (L)" visible: truncate title, then append marker before duration
-      put(L.cx, y, fit(mark .. label, math.max(1, tw - #lrcMark)) .. lrcMark
-        .. " " .. rjust(fmt(t.dur), 5), fg, bg)
-    end
-  end
-  drawScrollbar(W, #tracks, scroll.songs)
-
-  -- now playing strip (rainbow cycling text while a track is loaded)
-  local y = H - 4
-  put(1, y, string.rep(" ", W), P.npFg, P.npBg)
-  if S.cur then
-    local right = S.opos .. "/" .. #S.order
-    local left = (S.paused and "|| " or "\16 ")
-      .. S.cur.artist .. "  -  " .. S.cur.album .. "  -  " .. S.cur.title
-    local leftFit = fit(" " .. left, W - #right - 1)
-    putRainbow(1, y, leftFit, P.npBg)
-    put(W - #right, y, right, P.dim, P.npBg)
-  else
-    put(1, y, fit(" Nothing playing — pick a song in the right panel", W), P.dim, P.npBg)
-  end
-
-  -- progress
-  y = H - 3
-  local pos = position()
-  local dur = S.cur and S.cur.dur or 0
-  local px1, px2 = 8, W - 7
-  local pw = px2 - px1 + 1
-  put(2, y, rjust(fmt(pos), 5), P.fg, P.bg)
-  local filled = (dur > 0) and clamp(math.floor(pos / dur * pw + 0.5), 0, pw) or 0
-  put(px1, y, string.rep("=", filled), P.barOn, P.bg)
-  put(px1 + filled, y, string.rep("-", pw - filled), P.barOff, P.bg)
-  put(W - 5, y, rjust(fmt(dur), 5), P.fg, P.bg)
-  addHit(px1, px2, y, function(x)
-    if S.cur then seekTo((x - px1) / math.max(1, pw - 1) * S.cur.dur) end
-  end)
-
-  drawButtons(H - 2)
-
-  -- volume
-  y = H - 1
-  local vx1, vx2 = 10, W - 11
-  local vw = vx2 - vx1 + 1
-  put(1, y, " VOL ", P.fg, P.bg)
-  put(6, y, "[-]", P.fg, P.bg)
-  put(W - 9, y, "[+]", P.fg, P.bg)
-  addHit(6, 8, y, function() setVolume(S.volume - 0.1) end)
-  addHit(W - 9, W - 7, y, function() setVolume(S.volume + 0.1) end)
-  local vfill = math.floor(S.volume / CONFIG.maxVolume * vw + 0.5)
-  for i = 1, vw do
-    local f = i / vw * CONFIG.maxVolume
-    local c = (f <= 1.0) and P.vLow or ((f <= 2.0) and P.vMid or P.vHigh)
-    if S.muted then c = P.barOff end
-    put(vx1 + i - 1, y, i <= vfill and "=" or "-", i <= vfill and c or P.barOff, P.bg)
-  end
-  local function onVol(x)
-    local f = clamp((x - vx1) / math.max(1, vw - 1), 0, 1)
-    setVolume(math.floor(f * CONFIG.maxVolume / 0.05 + 0.5) * 0.05)
-  end
-  addHit(vx1, vx2, y, onVol, true)
-  put(W - 5, y, fit(S.muted and "MUTE" or (math.floor(S.volume * 100 + 0.5) .. "%"), 5),
-    S.muted and P.off or P.fg, P.bg)
-
-  y = H
-  if S.status ~= "" then
-    put(1, y, fit(" " .. S.status, W), P.vMid, P.bg)
-  else
-    put(1, y, fit(" TAB focus  ENTER play  SPACE pause  N/P skip  S shuffle  D DJ  L lyrics  F5 rescan  Q quit", W), P.dim, P.bg)
+  -- status line overwrites bottom-most nav corner briefly
+  if S.status ~= "" and ui.tab ~= "appearance" then
+    putFit(1, H, " " .. S.status, W, P.accent, P.navBg)
   end
 
   D.setVisible(true)
@@ -1682,40 +1901,6 @@ local function handleClick(x, y)
     if y == h.y and x >= h.x1 and x <= h.x2 then
       h.fn(x)
       return
-    end
-  end
-  if y < L.top or y > L.bot then return end
-
-  if x <= L.aw then
-    focus = "artists"
-    if x == L.aw then
-      local dir = (y < L.top + L.rows / 2) and -1 or 1
-      scroll.artists = scroll.artists + dir * math.max(1, L.rows - 1)
-    else
-      local idx = scroll.artists + (y - L.top) + 1
-      if artists[idx] then selectArtist(idx) end
-    end
-  elseif x >= L.bx and x < L.bx + L.bw then
-    focus = "albums"
-    if x == L.bx + L.bw - 1 then
-      local dir = (y < L.top + L.rows / 2) and -1 or 1
-      scroll.albums = scroll.albums + dir * math.max(1, L.rows - 1)
-    else
-      local idx = scroll.albums + (y - L.top) + 1
-      selectAlbum(idx)
-    end
-  elseif x >= L.cx then
-    focus = "songs"
-    if x == W then
-      local dir = (y < L.top + L.rows / 2) and -1 or 1
-      scroll.songs = scroll.songs + dir * math.max(1, L.rows - 1)
-    else
-      local al = currentAlbum()
-      local idx = scroll.songs + (y - L.top) + 1
-      if al and al.tracks[idx] then
-        selSong = idx
-        playAlbum(al, idx)
-      end
     end
   end
 end
@@ -1730,32 +1915,26 @@ local function handleDrag(x, y)
 end
 
 local function handleScroll(dir, x)
-  if x <= L.aw then
-    scroll.artists = scroll.artists + dir * 2
-  elseif x < L.cx then
-    scroll.albums = scroll.albums + dir * 2
+  if ui.tab == "lyrics" then
+    ui.lyricScroll = ui.lyricScroll + dir * 2
   else
-    scroll.songs = scroll.songs + dir * 2
+    ui.listScroll = ui.listScroll + dir * 2
   end
 end
 
 local function ensureVisibleSel()
-  local function keep(which, idx)
-    if idx - 1 < scroll[which] then
-      scroll[which] = math.max(0, idx - 1)
-    elseif idx > scroll[which] + L.rows then
-      scroll[which] = idx - L.rows
-    end
+  local rows = visibleRows()
+  if selSong - 1 < ui.listScroll then
+    ui.listScroll = math.max(0, selSong - 1)
+  elseif selSong > ui.listScroll + rows then
+    ui.listScroll = selSong - rows
   end
-  keep("artists", selArtist)
-  keep("albums", selAlbum)
-  keep("songs", selSong)
 end
 
 local function moveSel(delta)
-  if focus == "artists" then
+  if ui.browse == "artists" then
     selectArtist(clamp(selArtist + delta, 1, #artists))
-  elseif focus == "albums" then
+  elseif ui.browse == "albums" then
     local ar = currentArtist()
     if ar then selectAlbum(clamp(selAlbum + delta, 1, #ar.albums)) end
   else
@@ -1768,17 +1947,19 @@ local function moveSel(delta)
 end
 
 local function cycleFocus(dir)
-  local order = { "artists", "albums", "songs" }
+  -- cycle bottom tabs
   local i = 1
-  for k, v in ipairs(order) do if v == focus then i = k break end end
-  focus = order[((i - 1 + dir) % 3) + 1]
+  for k, v in ipairs(NAV) do if v.id == ui.tab then i = k break end end
+  local n = NAV[((i - 1 + dir - 1) % #NAV) + 1]
+  setTab(n.id)
 end
 
 local function rescan()
+  artCache = {}
   artists, allTracks = scan()
   if selArtist > #artists then selArtist = 1 end
   selectArtist(selArtist)
-  scroll.artists, scroll.albums, scroll.songs = 0, 0, 0
+  ui.listScroll = 0
   S.syncDirty = true
   refreshDiskSpace(true)
   local nArtists = 0
@@ -1788,14 +1969,12 @@ local function rescan()
   setStatus("Rescanned: " .. nArtists .. " artists, " .. #allTracks .. " songs")
 end
 
--- reveal playing track in the three panels when it changes
 local lastPath
 local function ensurePlayingVisible()
   local p = S.cur and S.cur.path
   if p == lastPath then return end
   lastPath = p
   if not p then return end
-  -- Keep virtual All Songs selection (library or per-artist) while that queue is active
   if S.src and S.src.virtual then
     if S.src.artist == "All Songs" then
       selArtist, selAlbum = 1, 1
@@ -1857,18 +2036,20 @@ local function handleKey(k)
   elseif k == keys.s then toggleShuffle()
   elseif k == keys.r then cycleRepeat()
   elseif k == keys.d then toggleDj()
-  elseif k == keys.l then toggleLyrics()
+  elseif k == keys.l then
+    toggleLyrics()
+    setTab("lyrics")
   elseif k == keys.m then toggleMute()
   elseif k == keys.x then stopPlayback()
+  elseif k == keys.a then setTab("appearance")
+  elseif k == keys.h then setTab("home")
   elseif k == keys.pageUp then
-    if focus == "artists" then scroll.artists = scroll.artists - (L.rows - 1)
-    elseif focus == "albums" then scroll.albums = scroll.albums - (L.rows - 1)
-    else scroll.songs = scroll.songs - (L.rows - 1) end
+    ui.listScroll = ui.listScroll - (visibleRows() - 1)
   elseif k == keys.pageDown then
-    if focus == "artists" then scroll.artists = scroll.artists + (L.rows - 1)
-    elseif focus == "albums" then scroll.albums = scroll.albums + (L.rows - 1)
-    else scroll.songs = scroll.songs + (L.rows - 1) end
+    ui.listScroll = ui.listScroll + (visibleRows() - 1)
   elseif k == keys.f5 then rescan()
+  elseif k == keys.backspace and ui.tab == "search" then
+    ui.search = (ui.search or ""):sub(1, -2)
   end
   return false
 end
@@ -1894,9 +2075,9 @@ local function housekeeping()
     S.dirty = false
     saveSettings()
   end
-  tickDjCut()  -- mid-song DJ auto-flip when armed (DJ on only)
-  refreshLyricLine()  -- advance synced lyric for side viz (no audio impact)
-  refreshDiskSpace(false)  -- re-query free/used every diskSpaceInterval (non-blocking)
+  tickDjCut()
+  refreshLyricLine()
+  refreshDiskSpace(false)
   ensurePlayingVisible()
 end
 
@@ -2026,6 +2207,9 @@ local function vizBroadcaster()
       b = copyLevels(vizLevels.bands, false),
       w = copyLevels(vizLevels.wave, true),
       lyricsOn = S.lyrics and true or false,
+      vizMode = settings.vizMode or "bars",
+      accent = settings.accent or "violet",
+      anim = settings.animations and true or false,
       ts = now(),
     }
     if needMeta then
@@ -2086,12 +2270,15 @@ local function uiLoop()
       handleDrag(p2, p3)
     elseif ev == "mouse_scroll" and not mon then
       handleScroll(p1, p2)
+    elseif ev == "char" and ui.tab == "search" then
+      if type(p1) == "string" and #p1 == 1 then
+        ui.search = (ui.search or "") .. p1
+      end
     elseif ev == "key" then
       if handleKey(p1) then return end
     elseif ev == "term_resize" or ev == "monitor_resize" then
       W, H = T.getSize()
       D.reposition(1, 1, W, H)
-      layout()
     elseif ev == "peripheral" then
       if refreshSpeakers() then S.spkDirty = now() end
       refreshDiskSpace(true)
