@@ -1,7 +1,9 @@
 --[[
   jukebox.lua — three-panel DFPWM jukebox for CC:Tweaked
-  Pixel UI (paintutils): library list + lyrics follow + APPEARANCE
+  Pixel UI (paintutils): AURORA-style now playing + library + lyrics + APPEARANCE
   Designed for 9×3 at text scale ~0.5–0.9; album art via beside .nfp
+  Now playing: art, scrubber, circular transport, LRC/QUEUE/VOL (no LIKE/FOLLOW)
+  Brand: ProOnlyUNO / CC Music — protocols pocket_mp3 + jukebox_viz unchanged
 
   Library (scanned on all attached disks + /music):
       disk/Artist/Album/*.dfpwm
@@ -168,7 +170,6 @@ local VIZ_MODES = { "bars", "wave", "vu", "off" }
 
 local settings = {
   volume = 1.0, muted = false, shuffle = false, rep = "off", dj = false, lyrics = false,
-  lyricsFollow = true,
   accent = "violet",
   textScale = CONFIG.monitorScale,
   animations = true,
@@ -188,7 +189,6 @@ local function loadSettings()
   if d.rep == "off" or d.rep == "all" or d.rep == "one" then settings.rep = d.rep end
   if type(d.dj) == "boolean" then settings.dj = d.dj end
   if type(d.lyrics) == "boolean" then settings.lyrics = d.lyrics end
-  if type(d.lyricsFollow) == "boolean" then settings.lyricsFollow = d.lyricsFollow end
   if type(d.accent) == "string" and ACCENTS[d.accent] then settings.accent = d.accent end
   if type(d.textScale) == "number" then settings.textScale = clamp(d.textScale, 0.5, 5) end
   if type(d.animations) == "boolean" then settings.animations = d.animations end
@@ -603,7 +603,6 @@ local function saveSettings()
   f.write(textutils.serialize({
     volume = S.volume, muted = S.muted, shuffle = S.shuffle, rep = S.rep, dj = S.dj,
     lyrics = S.lyrics,
-    lyricsFollow = settings.lyricsFollow,
     accent = settings.accent,
     textScale = settings.textScale,
     animations = settings.animations,
@@ -1390,12 +1389,14 @@ D.setCursorBlink(false)
 
 -- UI navigation (friend-style bottom tabs)
 local ui = {
-  tab = "library",          -- home | music | library | search | playlists | lyrics | appearance
+  tab = "music",            -- home | music | library | search | playlists | lyrics | appearance
   browse = "tracks",        -- artists | albums | tracks
   search = "",
   listScroll = 0,
   lyricScroll = 0,
   animPhase = 0,
+  showVol = false,          -- VOL overlay on now-playing
+  showQueue = false,        -- QUEUE overlay on now-playing
 }
 local hits = {}
 local artCache = {}
@@ -1434,8 +1435,8 @@ local function putFit(x, y, s, w, fg, bg)
   put(x, y, fit(tostring(s or ""), w), fg, bg)
 end
 
-local function addHit(x1, x2, y, fn, drag)
-  hits[#hits + 1] = { x1 = x1, x2 = x2, y = y, fn = fn, drag = drag }
+local function addHit(x1, x2, y, fn, drag, y2)
+  hits[#hits + 1] = { x1 = x1, x2 = x2, y = y, y1 = y, y2 = y2 or y, fn = fn, drag = drag }
 end
 
 local function pill(x, y, w, label, on, fn)
@@ -1444,6 +1445,28 @@ local function pill(x, y, w, label, on, fn)
   fill(x, y, x + w - 1, y, bg)
   putFit(x, y, " " .. label, w, fg, bg)
   if fn then addHit(x, x + w - 1, y, fn) end
+end
+
+-- Approximate filled ellipse (circular transport / scrubber knob).
+local function fillEllipse(cx, cy, rx, ry, col)
+  rx = math.max(1, rx)
+  ry = math.max(1, ry)
+  for dy = -ry, ry do
+    local t = 1 - (dy * dy) / (ry * ry)
+    if t >= 0 then
+      local w = math.floor(rx * math.sqrt(t) + 0.5)
+      fill(cx - w, cy + dy, cx + w, cy + dy, col)
+    end
+  end
+end
+
+local function circleBtn(cx, cy, rx, ry, label, on, fn)
+  local bg = on and P.accent or P.panel
+  local fg = on and P.accentFg or P.fg
+  fillEllipse(cx, cy, rx, ry, bg)
+  local lab = tostring(label or "")
+  put(cx - math.floor(#lab / 2), cy, lab, fg, bg)
+  if fn then addHit(cx - rx, cx + rx, cy - ry, fn, false, cy + ry) end
 end
 
 local function artPathFor(track)
@@ -1518,9 +1541,13 @@ end
 
 local function setTab(id)
   ui.tab = id
+  ui.showVol = false
+  ui.showQueue = false
   if id == "lyrics" then
     if not S.lyrics then toggleLyrics() end
-  elseif id == "library" or id == "music" then
+  elseif id == "home" or id == "music" then
+    -- now-playing (AURORA-style)
+  elseif id == "library" then
     ui.browse = "tracks"
   elseif id == "playlists" then
     -- jump to library All Songs
@@ -1567,6 +1594,9 @@ local function drawHeader(title, right)
   putFit(2, 1, title or "", math.max(8, W - 28), P.fg, P.bg)
   local credit = "ProOnlyUNO"
   put(W - #credit, 1, credit, P.credit, P.bg)
+  -- gear → appearance
+  put(W - #credit - 5, 1, "CFG", P.accent, P.bg)
+  addHit(W - #credit - 5, W - #credit - 3, 1, function() setTab("appearance") end)
   if right and right ~= "" then
     putFit(2, 2, right, W - 2, P.dim, P.bg)
   end
@@ -1590,12 +1620,12 @@ local function drawBottomNav()
   addHit(W - 3, W, y, function() setTab("appearance") end)
 end
 
-local function drawTransport()
+local function drawMiniTransport()
+  -- Compact transport for list / search / lyrics footers
   local y = H - 2
   fill(1, y, W, y, P.bg)
   local playing = S.cur and not S.paused
   local cx = math.floor(W / 2)
-  -- -10 / pause / +10
   pill(cx - 10, y, 5, "-10", false, function() seekTo(position() - CONFIG.seekStep) end)
   local pLab = playing and " || " or " >  "
   pill(cx - 3, y, 6, pLab, true, function()
@@ -1605,7 +1635,6 @@ local function drawTransport()
     end
   end)
   pill(cx + 4, y, 5, "+10", false, function() seekTo(position() + CONFIG.seekStep) end)
-  -- prev / next near right
   put(W - 11, y, "<<", P.fg, P.bg)
   put(W - 7, y, ">>", P.fg, P.bg)
   addHit(W - 11, W - 10, y, prevTrack)
@@ -1708,7 +1737,6 @@ local function drawTrackList()
         put(W - 8, y + 1, "L", P.accent, bg)
       end
       addHit(1, W - 1, y, function()
-        -- map filtered idx back if searching
         if ui.tab == "search" and (ui.search or "") ~= "" then
           for i, tr in ipairs(al.tracks) do
             if tr.path == t.path then selSong = i; playAlbum(al, i); return end
@@ -1742,47 +1770,175 @@ local function drawTrackList()
   end
 end
 
-local function drawHome()
+-- AURORA-style now playing (friend ref): art, scrubber, circular transport,
+-- LRC / QUEUE / VOL — no LIKE, no FOLLOW. Brand ProOnlyUNO / CC Music.
+local function drawNowPlaying()
   drawHeader("CC MUSIC", "Developer: ProOnlyUNO")
   local t = S.cur
+  local bot = H - 3
+  local artSize = clamp(math.min(14, math.floor(H / 4)), 6, 14)
+  local metaX = 3 + artSize + 2
+  local metaW = math.max(10, W - metaX - 1)
+
   if t then
-    drawArt(3, 4, t, 8)
-    putFit(13, 4, t.title, W - 14, P.fg, P.bg)
-    putFit(13, 5, t.artist, W - 14, P.dim, P.bg)
-    putFit(13, 6, t.album, W - 14, P.dim, P.bg)
-    local pos, dur = position(), t.dur or 0
-    putFit(13, 8, fmt(pos) .. " / " .. fmt(dur), W - 14, P.accent, P.bg)
-    local barX1, barX2 = 13, W - 2
-    local filled = (dur > 0) and clamp(math.floor(pos / dur * (barX2 - barX1 + 1) + 0.5), 0, barX2 - barX1 + 1) or 0
-    fill(barX1, 9, barX2, 9, P.panel)
-    if filled > 0 then fill(barX1, 9, barX1 + filled - 1, 9, P.accent) end
-    addHit(barX1, barX2, 9, function(x)
-      seekTo((x - barX1) / math.max(1, barX2 - barX1) * dur)
-    end)
+    drawArt(3, 3, t, artSize)
+    putFit(metaX, 3, "NOW PLAYING", metaW, P.accent, P.bg)
+    putFit(metaX, 5, t.title or "?", metaW, P.fg, P.bg)
+    putFit(metaX, 6, t.artist or "", metaW, P.dim, P.bg)
+    putFit(metaX, 7, t.album or "", metaW, P.dim, P.bg)
+    local qn = #S.queue
+    local qi = S.opos or 0
+    if qn > 0 then
+      putFit(metaX, 8, string.format("%d / %d  .  %s", qi, qn, t.album or ""), metaW, P.dim, P.bg)
+    end
   else
-    put(3, 5, "Nothing playing — open LIBRARY", P.dim, P.bg)
+    fill(3, 3, 3 + artSize - 1, 3 + artSize - 1, P.panel)
+    put(3 + math.floor(artSize / 2), 3 + math.floor(artSize / 2), "?", P.dim, P.panel)
+    putFit(metaX, 5, "Nothing playing", metaW, P.dim, P.bg)
+    putFit(metaX, 6, "Open LIBRARY to pick a track", metaW, P.dim, P.bg)
   end
-  put(3, 12, "Animations: " .. (settings.animations and "ON" or "OFF"), P.dim, P.bg)
-  put(3, 13, "Viz: " .. string.upper(settings.vizMode or "bars"), P.accent, P.bg)
+
+  -- Scrubber
+  local scrubY = math.max(3 + artSize + 1, 12)
+  if scrubY > bot - 10 then scrubY = math.max(10, bot - 10) end
+  local barX1, barX2 = 4, W - 3
+  local pos = t and position() or 0
+  local dur = t and (t.dur or 0) or 0
+  put(barX1, scrubY - 1, "-10", P.accent, P.bg)
+  addHit(barX1, barX1 + 2, scrubY - 1, function() seekTo(position() - CONFIG.seekStep) end)
+  put(barX2 - 2, scrubY - 1, "+10", P.accent, P.bg)
+  addHit(barX2 - 2, barX2, scrubY - 1, function() seekTo(position() + CONFIG.seekStep) end)
+  fill(barX1, scrubY, barX2, scrubY, P.panel)
+  local span = math.max(1, barX2 - barX1)
+  local filled = (dur > 0) and clamp(math.floor(pos / dur * span + 0.5), 0, span) or 0
+  if filled > 0 then fill(barX1, scrubY, barX1 + filled - 1, scrubY, P.accent) end
+  local knobX = barX1 + filled
+  fillEllipse(knobX, scrubY, 1, 1, colors.white)
+  addHit(barX1, barX2, scrubY, function(x)
+    if dur > 0 then seekTo((x - barX1) / span * dur) end
+  end, true)
+  put(barX1, scrubY + 1, fmt(pos), P.dim, P.bg)
+  local durStr = fmt(dur)
+  put(barX2 - #durStr + 1, scrubY + 1, durStr, P.dim, P.bg)
+
+  -- Circular transport: shuffle | prev | play | next | repeat
+  local trY = scrubY + 3
+  local cx = math.floor(W / 2)
+  local gap = math.max(6, math.floor(W / 14))
+  circleBtn(cx - gap * 2, trY, 2, 1, S.shuffle and "SH" or "sh", S.shuffle, toggleShuffle)
+  circleBtn(cx - gap, trY, 2, 1, "<<", false, prevTrack)
+  local playing = S.cur and not S.paused
+  circleBtn(cx, trY, 3, 2, playing and "||" or ">", true, function()
+    if not togglePause() and not S.cur then
+      local al = currentAlbum()
+      if al then playAlbum(al, selSong) else playAllFrom(1) end
+    end
+  end)
+  circleBtn(cx + gap, trY, 2, 1, ">>", false, function() if S.cur then advance(1, false) end end)
+  local repOn = S.rep ~= "off"
+  local repLab = (S.rep == "one" and "R1") or (S.rep == "all" and "RA") or "rp"
+  circleBtn(cx + gap * 2, trY, 2, 1, repLab, repOn, cycleRepeat)
+
+  -- Utility row: LRC / QUEUE / VOL  (no LIKE)
+  local utilY = trY + 4
+  local bw = math.max(8, math.floor((W - 8) / 3))
+  local ux = math.floor((W - bw * 3 - 4) / 2)
+  pill(ux, utilY, bw, " LRC", ui.tab == "lyrics", function() setTab("lyrics") end)
+  pill(ux + bw + 2, utilY, bw, " QUEUE", ui.showQueue, function()
+    ui.showQueue = not ui.showQueue
+    ui.showVol = false
+    S.dirty = true
+  end)
+  pill(ux + (bw + 2) * 2, utilY, bw, " VOL", ui.showVol, function()
+    ui.showVol = not ui.showVol
+    ui.showQueue = false
+    S.dirty = true
+  end)
+
+  local infoY = utilY + 2
+  local hasLrc = t and trackHasLyrics(t)
+  local lrcMsg = hasLrc and "SYNCED LRC  .  TAP LRC" or "NO LYRICS  .  TAP TO VIEW"
+  putFit(3, infoY, lrcMsg, W - 16, hasLrc and P.accent or P.dim, P.bg)
+  put(W - 10, infoY, "LIVE PCM", P.dim, P.bg)
+  addHit(3, math.min(W - 16, 3 + #lrcMsg), infoY, function() setTab("lyrics") end)
+
+  -- Mini viz strip (pixel blocks from PCM bands)
+  local vizY = infoY + 1
+  if vizY < bot then
+    local bands = vizLevels.bands or {}
+    local n = math.max(1, #bands)
+    local vw = W - 4
+    for i = 1, vw do
+      local bi = math.floor((i - 1) / vw * n) + 1
+      local v = bands[bi] or 0
+      local on = v > 0.08 or (settings.animations and ((ui.animPhase + i) % 7) == 0 and S.cur and not S.paused)
+      fill(2 + i, vizY, 2 + i, vizY, on and P.accent or P.panel)
+    end
+  end
+
+  -- VOL overlay
+  if ui.showVol then
+    local vy = math.min(bot - 1, utilY + 4)
+    fill(3, vy, W - 2, vy, P.panel)
+    put(3, vy, "VOL", P.fg, P.panel)
+    local vx1, vx2 = 8, W - 10
+    local vfill = math.floor(S.volume / CONFIG.maxVolume * (vx2 - vx1 + 1) + 0.5)
+    fill(vx1, vy, vx2, vy, P.muted)
+    if vfill > 0 then fill(vx1, vy, vx1 + vfill - 1, vy, P.accent) end
+    addHit(vx1, vx2, vy, function(x)
+      setVolume(((x - vx1) / math.max(1, vx2 - vx1)) * CONFIG.maxVolume)
+    end, true)
+    local pct = S.muted and "MUTE" or (math.floor(S.volume * 100 + 0.5) .. "%")
+    put(W - 6, vy, fit(pct, 5), P.fg, P.panel)
+  end
+
+  -- QUEUE overlay (upcoming from current order)
+  if ui.showQueue then
+    local qy = math.min(bot - 1, utilY + (ui.showVol and 5 or 4))
+    fill(2, qy, W - 1, math.min(H - 3, qy + 4), P.panel)
+    putFit(3, qy, "QUEUE", W - 4, P.accent, P.panel)
+    local shown = 0
+    if #S.queue > 0 and #S.order > 0 then
+      for i = 0, 3 do
+        local oi = S.opos + i
+        if oi > #S.order then break end
+        local tr = S.queue[S.order[oi]]
+        if tr then
+          shown = shown + 1
+          local yy = qy + shown
+          if yy > H - 3 then break end
+          local prefix = (i == 0) and "> " or "  "
+          putFit(3, yy, prefix .. (tr.title or "?") .. "  ·  " .. (tr.artist or ""), W - 4,
+            i == 0 and P.fg or P.dim, P.panel)
+        end
+      end
+    else
+      putFit(3, qy + 1, "Queue empty", W - 4, P.dim, P.panel)
+    end
+  end
+end
+
+local function drawHome()
+  drawNowPlaying()
 end
 
 local function drawLyricsView()
   local t = S.cur
   drawHeader("LYRICS", t and (t.title .. "  ·  " .. t.artist) or "No track")
-  -- SYNCED LRC + FOLLOW
+  -- Always sync-scroll to the active line (no FOLLOW badge / toggle).
   local synced = t and S.lyricLines and #S.lyricLines > 0
-  put(W - 18, 1, synced and "SYNCED LRC" or "NO LRC", synced and P.accent or P.dim, P.bg)
-  pill(W - 12, 2, 10, settings.lyricsFollow and "FOLLOW" or "MANUAL", settings.lyricsFollow, function()
-    settings.lyricsFollow = not settings.lyricsFollow
-    S.dirty = true
-  end)
+  if synced then
+    putFit(2, 2, "SYNCED", 8, P.accent, P.bg)
+  else
+    putFit(2, 2, "NO LRC", 8, P.dim, P.bg)
+  end
 
   local lines = S.lyricLines or {}
   local curIdx = S.lyricIdx or 1
   local top = contentTop()
   local bot = contentBot()
   local rows = math.max(1, bot - top + 1)
-  if settings.lyricsFollow and synced then
+  if synced then
     ui.lyricScroll = clamp(curIdx - math.floor(rows / 2), 0, math.max(0, #lines - rows))
   end
   ui.lyricScroll = clamp(ui.lyricScroll, 0, math.max(0, #lines - rows))
@@ -1886,19 +2042,18 @@ local function draw()
     drawAppearance()
   elseif ui.tab == "lyrics" then
     drawLyricsView()
-    drawTransport()
-  elseif ui.tab == "home" then
-    drawHome()
-    drawTransport()
+    drawMiniTransport()
+  elseif ui.tab == "home" or ui.tab == "music" then
+    drawNowPlaying()
   elseif ui.tab == "search" then
     -- search uses track list body
     local keep = ui.search
     drawHeader("SEARCH", "Filter: " .. (keep ~= "" and keep or "(all)"))
     drawTrackList()
-    drawTransport()
+    drawMiniTransport()
   else
     drawTrackList()
-    drawTransport()
+    drawMiniTransport()
   end
 
   if ui.tab ~= "appearance" then
@@ -1916,7 +2071,8 @@ end
 local function handleClick(x, y)
   for i = #hits, 1, -1 do
     local h = hits[i]
-    if y == h.y and x >= h.x1 and x <= h.x2 then
+    local y1, y2 = h.y1 or h.y, h.y2 or h.y
+    if y >= y1 and y <= y2 and x >= h.x1 and x <= h.x2 then
       h.fn(x)
       return
     end
@@ -1925,7 +2081,8 @@ end
 
 local function handleDrag(x, y)
   for _, h in ipairs(hits) do
-    if h.drag and y == h.y then
+    local y1, y2 = h.y1 or h.y, h.y2 or h.y
+    if h.drag and y >= y1 and y <= y2 then
       h.fn(clamp(x, h.x1, h.x2))
       return
     end
