@@ -4764,7 +4764,7 @@ end
 function Video.load(path)
   local data = Store.readRaw(path)
   if not data or #data < Video.headerSize then Video.error = "Cannot read video"; return false end
-  -- 48 MiB allows ~128×36 @ 8 fps for ~5 min tracks (default encode).
+  -- 48 MiB allows ~256×72 @ 8 fps for ~2.5 min tracks (default encode / Escape).
   if #data > 48 * 1024 * 1024 then Video.error = "Video file is too large"; return false end
   if data:sub(1, 5) ~= Video.magic then Video.error = "Not a CVID1 file"; return false end
   local version = data:byte(6) or 0
@@ -4772,7 +4772,7 @@ function Video.load(path)
   local w, h = u16(data, 7), u16(data, 9)
   local frames = u32(data, 11)
   local defaultMs = u16(data, 15)
-  -- Allow up to a full 9×3 @ 0.5 wall (~270×60); default packs use 128×36.
+  -- Cap above wall (~270×60); default packs use 256×72 under the size budget.
   if w < 1 or h < 1 or w > 320 or h > 120 or frames < 1 or frames > 30000 then
     Video.error = "Invalid video dimensions"
     return false

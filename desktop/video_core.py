@@ -35,14 +35,14 @@ ProgressFn = Callable[[str, float | None, str], None]
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpeg", ".mpg"}
 
 # Target wall: 9×3 advanced monitors @ scale 0.5 (~270×60 cells; INSTALL.md).
-# Encode at half that (~128×36) so fill-blit stays sharp without mushy 4×+ upscale,
-# while packs for multi-minute songs stay under the jukebox load budget.
-DEFAULT_CELLS_W = 128
-DEFAULT_CELLS_H = 36
+# Default encode: 256×72 @ 8 fps — highest probe size that still loads Escape
+# (~141s) under jukebox caps (48 MiB / w≤320 / h≤120). Fill-blit scales to wall.
+DEFAULT_CELLS_W = 256
+DEFAULT_CELLS_H = 72
 DEFAULT_FPS = 8
 DEFAULT_MAX_SECONDS = 0  # 0 = full clip
-# Documented wall size (for CLI/UI hints). Full-native encode exceeds typical
-# .cvid size limits for long tracks; prefer DEFAULT_* above.
+# Documented wall size (for CLI/UI hints). Longer tracks may need fewer cells
+# to stay under the 48 MiB load budget; Escape @ ~141s fits 256×72.
 TARGET_MONITOR_CELLS_W = 270
 TARGET_MONITOR_CELLS_H = 60
 
