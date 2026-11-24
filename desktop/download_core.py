@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable, Sequence
 import lyrics_core
 from meta_parse import TrackMeta, artist_album_dest, resolve_track_meta, safe_filename_stem
 from name_sanitize import sanitize_media_path, unique_filename
+from nfp_core import convert_art_for_track, find_cover_image, write_nfp
 
 LogFn = Callable[[str], None]
 CancelFn = Callable[[], bool]
@@ -49,6 +50,7 @@ class DownloadedTrack:
     meta: TrackMeta
     entry: PlaylistEntry
     lrc: Path | None = None
+    art: Path | None = None  # sibling cover image or .nfp
 
 
 @dataclass
@@ -818,6 +820,7 @@ def _download_one_api(
         "noplaylist": True,
         "format": "bestaudio/best",
         "outtmpl": outtmpl,
+        "writethumbnail": True,
         # Prefer keeping artist/title in tags even after filename cleanup.
         "postprocessors": [
             {
@@ -826,6 +829,7 @@ def _download_one_api(
                 "preferredquality": "0",
             },
             {"key": "FFmpegMetadata", "add_metadata": True},
+            {"key": "FFmpegThumbnailsConvertor", "format": "jpg"},
         ],
         "postprocessor_args": {
             "ffmpeg": [
@@ -875,6 +879,9 @@ def _download_one_exe(
         "--audio-quality",
         "0",
         "--embed-metadata",
+        "--write-thumbnail",
+        "--convert-thumbnails",
+        "jpg",
         "--parse-metadata",
         f"{meta.artist}:%(artist)s",
         "--parse-metadata",
@@ -907,7 +914,7 @@ def organize_tracks(
     log: LogFn | None = None,
     progress: ProgressFn | None = None,
 ) -> Path:
-    """Move MP3 + sibling .lrc into ``library_root/Artist/Album/Song.*``."""
+    """Move MP3 + sibling .lrc / cover art into ``library_root/Artist/Album/Song.*``."""
     root = Path(library_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     reserved: set[str] = set()
@@ -925,6 +932,12 @@ def organize_tracks(
             old_lrc = t.lrc
         elif old_path.with_suffix(".lrc").exists():
             old_lrc = old_path.with_suffix(".lrc")
+
+        old_art = None
+        if t.art and Path(t.art).exists():
+            old_art = Path(t.art)
+        else:
+            old_art = find_cover_image(old_path)
 
         dest = artist_album_dest(root, t.meta, t.path.suffix, reserved=reserved)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -945,6 +958,37 @@ def organize_tracks(
             t.lrc = new_lrc
         else:
             t.lrc = new_lrc if new_lrc.exists() else None
+
+        # Keep song cover beside the track; also seed album cover.nfp for the jukebox.
+        if old_art is not None and old_art.exists():
+            art_dest = dest.with_suffix(old_art.suffix.lower())
+            try:
+                if old_art.resolve() != art_dest.resolve():
+                    if art_dest.exists():
+                        art_dest.unlink()
+                    old_art.rename(art_dest)
+                # Convert PNG/JPG → Song.nfp (+ album cover.nfp) beside the track.
+                nfp = convert_art_for_track(
+                    dest,
+                    dest,
+                    size=16,
+                    overwrite=False,
+                    ffmpeg=shutil.which("ffmpeg"),
+                    log=log,
+                )
+                if nfp is None and art_dest.suffix.lower() != ".nfp":
+                    song_nfp = dest.with_suffix(".nfp")
+                    write_nfp(art_dest, song_nfp, size=16)
+                    cover_nfp = dest.parent / "cover.nfp"
+                    if not cover_nfp.exists():
+                        write_nfp(art_dest, cover_nfp, size=16)
+                    nfp = song_nfp
+                    if log:
+                        log(f"  art  {song_nfp.relative_to(root).as_posix()}")
+                t.art = nfp or art_dest
+            except OSError as e:
+                if log:
+                    log(f"  warn: could not keep cover art: {e}")
         if progress:
             progress(
                 "organize",

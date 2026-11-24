@@ -44,3 +44,5 @@ Notes
   Main computer must be running the current jukebox.lua (it broadcasts to the viz).
   After replacing visualizer.lua, restart that side PC — F5 is not enough.
   Lyrics mode with an empty lyric line keeps the fancy viz (no “(waiting…)”).
+  APPEARANCE on the main jukebox picks Bars / Wave / VU / Off (field vizMode on
+  jukebox_viz). Accent + animations also ride along on the same packets.

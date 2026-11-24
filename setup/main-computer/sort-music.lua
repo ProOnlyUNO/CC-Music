@@ -137,8 +137,33 @@ local function isLrc(name)
   return type(name) == "string" and name:lower():match("%.lrc$") ~= nil
 end
 
+local function isNfp(name)
+  return type(name) == "string" and name:lower():match("%.nfp$") ~= nil
+end
+
 local function isSfxName(name)
   return type(name) == "string" and name:lower():match("^sfx.*%.dfpwm$") ~= nil
+end
+
+-- Move Song.lrc / Song.nfp / cover.nfp alongside a relocated .dfpwm.
+local function moveAudioSidecars(srcDir, stem, destDir, destAudioName)
+  local destStem = tostring(destAudioName or ""):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  if destStem == "" then destStem = stem end
+  local srcLrc = fs.combine(srcDir, stem .. ".lrc")
+  if fs.exists(srcLrc) and not fs.isDir(srcLrc) then
+    movePath(srcLrc, fs.combine(destDir, destStem .. ".lrc"))
+  end
+  local srcNfp = fs.combine(srcDir, stem .. ".nfp")
+  if fs.exists(srcNfp) and not fs.isDir(srcNfp) then
+    movePath(srcNfp, fs.combine(destDir, destStem .. ".nfp"))
+  end
+  -- Album-level cover art travels with the album folder (mergeDirInto), but
+  -- when flattening a singles-title folder keep cover.nfp if present.
+  local srcCover = fs.combine(srcDir, "cover.nfp")
+  local dstCover = fs.combine(destDir, "cover.nfp")
+  if fs.exists(srcCover) and not fs.isDir(srcCover) and not fs.exists(dstCover) then
+    movePath(srcCover, dstCover)
+  end
 end
 
 local function norm(s)
@@ -656,27 +681,27 @@ local function runMusic()
                 local ok, err = movePath(src, fs.combine(destDir, destName))
                 if ok then
                   movedSingles = movedSingles + 1
-                  -- Bring beside .lrc along under the dest stem
-                  local srcLrc = fs.combine(entryPath, stem .. ".lrc")
-                  if fs.exists(srcLrc) and not fs.isDir(srcLrc) then
-                    local dstLrc = fs.combine(destDir,
-                      destName:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc")
-                    movePath(srcLrc, dstLrc)
-                  end
+                  -- Bring beside .lrc / .nfp along under the dest stem
+                  moveAudioSidecars(entryPath, stem, destDir, destName)
                 else
                   printError("    ! " .. tostring(err))
                 end
-              elseif not fs.isDir(src) and isLrc(f) then
-                -- leftover .lrc without audio handled below / lyrics pass
+              elseif not fs.isDir(src) and (isLrc(f) or isNfp(f)) then
+                -- leftover .lrc/.nfp without audio handled below / lyrics pass
               elseif fs.isDir(src) then
                 mergeDirInto(src, destDir, "singles-title")
               end
             end
-            -- Move any remaining loose .lrc using titleHint
+            -- Move any remaining loose .lrc / .nfp using titleHint
             for _, f in ipairs(listDir(entryPath)) do
               local src = fs.combine(entryPath, f)
               if not fs.isDir(src) and isLrc(f) then
                 movePath(src, fs.combine(destDir, titleHint .. ".lrc"))
+              elseif not fs.isDir(src) and isNfp(f) and f:lower() ~= "cover.nfp" then
+                movePath(src, fs.combine(destDir, titleHint .. ".nfp"))
+              elseif not fs.isDir(src) and f:lower() == "cover.nfp" then
+                local dstCover = fs.combine(destDir, "cover.nfp")
+                if not fs.exists(dstCover) then movePath(src, dstCover) end
               end
             end
             if #listDir(entryPath) == 0 then pcall(fs.delete, entryPath) end
@@ -1859,7 +1884,7 @@ local function runRootCleanup(phase)
             local ok, err = movePath(path, dest)
             if ok then
               movedAudio = movedAudio + 1
-              -- Sibling .lrc with same stem rides along
+              -- Sibling .lrc / .nfp with same stem rides along
               local stem = name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
               local sib = stem .. ".lrc"
               if fs.exists(sib) and not fs.isDir(sib) and not isProtectedRootEntry(sib) then
@@ -1867,6 +1892,13 @@ local function runRootCleanup(phase)
                 print((opts.dryRun and "  ~ root-lrc " or "  root-lrc ")
                   .. sib .. " → " .. dstLrc)
                 if movePath(sib, dstLrc) then movedLrc = movedLrc + 1 end
+              end
+              local sibArt = stem .. ".nfp"
+              if fs.exists(sibArt) and not fs.isDir(sibArt) and not isProtectedRootEntry(sibArt) then
+                local dstNfp = dest:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".nfp"
+                print((opts.dryRun and "  ~ root-nfp " or "  root-nfp ")
+                  .. sibArt .. " → " .. dstNfp)
+                movePath(sibArt, dstNfp)
               end
             else
               printError("  ! " .. tostring(err))

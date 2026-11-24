@@ -5,7 +5,7 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 **Developer: ProOnlyUNO** · v1.0.0
 
 1. **Download** — YouTube playlist/album **or Genius album** → MP3 (yt-dlp) → auto LRCLIB lyrics → optional **Artist/Album** folders
-2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc`)
+2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc` + `.nfp` art from cover PNG/JPG / embedded art)
 3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
 4. **How to use** / **Commands** — friendly in-app guides
 
@@ -65,11 +65,11 @@ Start with **`setup/START_HERE.txt`**.
 ## Desktop flow → Minecraft
 
 1. **Download** (optional) → auto lyrics → organize `Artist/Album`
-2. **Convert** to `.dfpwm` (keeps Artist/Album + copies `.lrc`)
+2. **Convert** to `.dfpwm` (keeps Artist/Album + copies `.lrc` + writes `.nfp` art)
 3. **Fetch lyrics** again only if you need a library re-scan
-4. Copy Artist/Album trees into the game
-5. Run **Importer** and drag-drop onto the **computer screen**
-6. Restart jukebox so tracks with lyrics show `(L)`
+4. Copy Artist/Album trees into the game (keep `Song.nfp` / `cover.nfp` with tracks)
+5. Run **Importer** and drag-drop `.dfpwm` / `.lrc` / `.nfp` onto the **computer screen**
+6. Restart jukebox — pixel UI shows art thumbs; lyrics FOLLOW; APPEARANCE for accents / viz mode
 
 ## App tabs
 
