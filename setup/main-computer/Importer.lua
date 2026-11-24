@@ -24,15 +24,19 @@
   .lrc: match to an existing library .dfpwm (basename / normalized /
       Artist - Title / [ti:][ar:] tags). Prefer the current artist/album
       session folder when a song of that name is there or was just
-      imported in the same drop. Write beside that .dfpwm; optional
-      /lyrics mirror with multi-disk spill. Clear match/miss prints.
+      imported in the same drop. Write beside that .dfpwm; if that disk
+      is full, spill to the same Artist/Album on the next free disk.
+      Optional /lyrics mirror with multi-disk spill. Clear match/miss prints.
 
-  .cvid: same basename match as .lrc — lands beside the matching .dfpwm so
-      jukebox can hand off the main monitor to the music video after ~3.5s.
+  .cvid / .cvid.N: same basename match as .lrc — prefer beside the
+      matching .dfpwm; if that disk is full, spill Artist/Album onto the
+      next free disk (jukebox finds packs across mounts). Multipart
+      high-res packs use Song.cvid.1/.2/.3 (each ≤ ~20 MiB).
 
   .nfp / .png / .jpg: place into matching Artist/Album.
-      cover/album/folder/front/art names → album cover.* beside the album.
-      Song-named art → beside the matching .dfpwm.
+      cover/album/folder/front/art names → album cover.* beside the album
+      (spill to next free disk when full).
+      Song-named art → beside the matching .dfpwm (same spill).
       If no album/track match, prompt for Artist + Album.
       Jukebox thumbs need .nfp (desktop Convert turns PNG/JPG into .nfp).
 
@@ -769,6 +773,111 @@ local function writeBytes(path, data)
   return true
 end
 
+-- Write beside the track when its disk has room; otherwise create the same
+-- music/<Artist>/<Album>/ on the next free disk and put the sidecar there.
+local function placeBesideOrSpill(track, fileName, data)
+  local beside = fs.combine(fs.getDir(track.path), fileName)
+  local need = #data + CONFIG.reserve
+  if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
+    return "duplicate", beside, false
+  end
+
+  local preferMount = mountOf(track.path)
+  local preferPath = preferMount == "" and "/" or preferMount
+  if freeSpace(preferPath) >= need then
+    local ok, err = writeBytes(beside, data)
+    if ok then return "ok", beside, false end
+    local msg = tostring(err or ""):lower()
+    if not msg:find("space", 1, true) then
+      return "error", tostring(err), false
+    end
+  end
+
+  local artist = track.artist or "Singles"
+  local album = track.album or track.albumName or "Singles"
+  local _, _, nestedRel = albumParts(artist, album)
+  local bad = {}
+  if preferMount ~= "" then bad[preferMount] = true end
+
+  for _ = 1, 12 do
+    local d = pickDisk(artist, nestedRel, #data, bad)
+    if not d then
+      for _, cand in ipairs(listDisks()) do
+        if not bad[cand.mount] and freeSpace(cand.mount) >= need then
+          d = cand
+          break
+        end
+      end
+    end
+    if not d then return "full", beside, false end
+
+    local dir = fs.combine(musicDir(d), nestedRel)
+    local path = fs.combine(dir, fileName)
+    if fs.exists(path) and not fs.isDir(path) and fileSize(path) == #data then
+      return "duplicate", path, true
+    end
+    local ok, err = writeBytes(path, data)
+    if ok then return "ok", path, true end
+    bad[d.mount] = true
+    local msg = tostring(err or ""):lower()
+    if not msg:find("space", 1, true) and freeSpace(d.mount) >= need then
+      return "error", tostring(err), false
+    end
+  end
+  return "full", beside, false
+end
+
+local function placeInAlbumOrSpill(artist, album, fileName, data, preferDir)
+  local need = #data + CONFIG.reserve
+  local _, _, nestedRel = albumParts(artist, album)
+
+  local function tryDir(dir, spilled)
+    if not dir then return nil end
+    local path = fs.combine(dir, fileName)
+    if fs.exists(path) and not fs.isDir(path) and fileSize(path) == #data then
+      return "duplicate", path, spilled
+    end
+    local m = mountOf(dir)
+    local mpath = m == "" and "/" or m
+    if freeSpace(mpath) < need then return nil end
+    local ok, err = writeBytes(path, data)
+    if ok then return "ok", path, spilled end
+    local msg = tostring(err or ""):lower()
+    if not msg:find("space", 1, true) then
+      return "error", tostring(err), spilled
+    end
+    return nil
+  end
+
+  if preferDir then
+    local status, detail, spilled = tryDir(preferDir, false)
+    if status then return status, detail, spilled end
+  end
+
+  local bad = {}
+  if preferDir then
+    local m = mountOf(preferDir)
+    if m ~= "" then bad[m] = true end
+  end
+  for _ = 1, 12 do
+    local d = pickDisk(artist, nestedRel, #data, bad)
+    if not d then
+      for _, cand in ipairs(listDisks()) do
+        if not bad[cand.mount] and freeSpace(cand.mount) >= need then
+          d = cand
+          break
+        end
+      end
+    end
+    if not d then return "full", preferDir and fs.combine(preferDir, fileName) or fileName, false end
+    local dir = fs.combine(musicDir(d), nestedRel)
+    local status, detail, spilled = tryDir(dir, true)
+    if status then return status, detail, spilled end
+    bad[d.mount] = true
+  end
+  return "full", preferDir and fs.combine(preferDir, fileName) or fileName, false
+end
+
 local function mirrorLrc(data, track, lrcFileName)
   if not CONFIG.mirrorLyrics then return nil end
   local rel = fs.combine(track.artist or "Singles", track.album or "Singles", lrcFileName)
@@ -813,53 +922,34 @@ local function storeLrc(artist, album, fileName, data, batchPaths)
   end
 
   local lrcName = hit.base .. ".lrc"
-  local beside = fs.combine(fs.getDir(hit.path), lrcName)
-  if fs.exists(beside) and not fs.isDir(beside) then
-    if fileSize(beside) == #data then
-      local mirrored = select(1, mirrorLrc(data, hit, lrcName))
-      return "duplicate", hit, beside, mirrored
+  local status, detail, spilled = placeBesideOrSpill(hit, lrcName, data)
+  if status == "ok" or status == "duplicate" then
+    local mirrored = select(1, mirrorLrc(data, hit, lrcName))
+    if spilled and status == "ok" then
+      say("  (disk full beside track — spilled .lrc to " .. tostring(detail) .. ")", colours.lightGrey)
     end
+    return status, hit, detail, mirrored
   end
-
-  local need = #data + CONFIG.reserve
-  local m = mountOf(hit.path)
-  local mpath = m == "" and "/" or m
-  if freeSpace(mpath) < need then
-    return "full", hit, beside
-  end
-
-  local ok, err = writeBytes(beside, data)
-  if not ok then
-    return "error", hit, tostring(err)
-  end
-  local mirrored = select(1, mirrorLrc(data, hit, lrcName))
-  return "ok", hit, beside, mirrored
+  return status, hit, detail
 end
 
--- Place .cvid beside matching .dfpwm (same basename rules as lyrics).
+-- Place .cvid / .cvid.N beside matching .dfpwm (spill across disks when full).
 local function storeCvid(artist, album, fileName, data, batchPaths)
   local tracks = scanLibraryTracks()
-  local base = fileName:gsub("%.[Cc][Vv][Ii][Dd]$", "")
+  local partNum = fileName:match("%.[Cc][Vv][Ii][Dd]%.(%d+)$")
+  local base = fileName
+    :gsub("%.[Cc][Vv][Ii][Dd]%.%d+$", "")
+    :gsub("%.[Cc][Vv][Ii][Dd]$", "")
   local hit = matchTrack(tracks, artist, album, base, nil, nil, batchPaths)
   if not hit then
     return "miss", nil, base
   end
-  local cvidName = hit.base .. ".cvid"
-  local beside = fs.combine(fs.getDir(hit.path), cvidName)
-  if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
-    return "duplicate", hit, beside
+  local cvidName = partNum and (hit.base .. ".cvid." .. partNum) or (hit.base .. ".cvid")
+  local status, detail, spilled = placeBesideOrSpill(hit, cvidName, data)
+  if spilled and status == "ok" then
+    say("  (disk full beside track — spilled .cvid to " .. tostring(detail) .. ")", colours.lightGrey)
   end
-  local need = #data + CONFIG.reserve
-  local m = mountOf(hit.path)
-  local mpath = m == "" and "/" or m
-  if freeSpace(mpath) < need then
-    return "full", hit, beside
-  end
-  local ok, err = writeBytes(beside, data)
-  if not ok then
-    return "error", hit, tostring(err)
-  end
-  return "ok", hit, beside
+  return status, hit, detail
 end
 
 local function promptArtDestination(defaultArtist, defaultAlbum)
@@ -921,13 +1011,11 @@ local function storeArt(artist, album, fileName, data, batchPaths)
       return "miss", nil, folderFor(artist, album)
     end
     local coverName = (ext == ".nfp") and "cover.nfp" or ("cover" .. ext)
-    local beside = fs.combine(albumDir, coverName)
-    if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
-      return "duplicate", nil, beside
+    local status, detail, spilled = placeInAlbumOrSpill(artist, album, coverName, data, albumDir)
+    if spilled and status == "ok" then
+      say("  (disk full — spilled cover to " .. tostring(detail) .. ")", colours.lightGrey)
     end
-    local ok, err = writeBytes(beside, data)
-    if not ok then return "error", nil, tostring(err) end
-    return "ok", nil, beside
+    return status, nil, detail
   end
 
   local hit = matchTrack(tracks, artist, album, base, nil, nil, batchPaths)
@@ -944,42 +1032,31 @@ local function storeArt(artist, album, fileName, data, batchPaths)
       return "miss", nil, base
     end
     local coverName = (ext == ".nfp") and "cover.nfp" or ("cover" .. ext)
-    local beside = fs.combine(albumDir, coverName)
-    if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
-      return "duplicate", nil, beside
+    local status, detail, spilled = placeInAlbumOrSpill(artist, album, coverName, data, albumDir)
+    if status == "ok" then
+      say("  (no song match — saved as album cover)", colours.lightGrey)
+      if spilled then
+        say("  (disk full — spilled cover to " .. tostring(detail) .. ")", colours.lightGrey)
+      end
     end
-    local ok, err = writeBytes(beside, data)
-    if not ok then return "error", nil, tostring(err) end
-    say("  (no song match — saved as album cover)", colours.lightGrey)
-    return "ok", nil, beside
+    return status, nil, detail
   end
 
   local artName = hit.base .. ext
-  local beside = fs.combine(fs.getDir(hit.path), artName)
-  if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
-    return "duplicate", hit, beside
-  end
-
-  local need = #data + CONFIG.reserve
-  local m = mountOf(hit.path)
-  local mpath = m == "" and "/" or m
-  if freeSpace(mpath) < need then
-    return "full", hit, beside
-  end
-
-  local ok, err = writeBytes(beside, data)
-  if not ok then
-    return "error", hit, tostring(err)
+  local status, detail, spilled = placeBesideOrSpill(hit, artName, data)
+  if spilled and status == "ok" then
+    say("  (disk full beside track — spilled art to " .. tostring(detail) .. ")", colours.lightGrey)
   end
 
   -- Seed album cover when missing (nfp only — jukebox thumbs).
-  if ext == ".nfp" then
-    local cover = fs.combine(fs.getDir(hit.path), "cover.nfp")
+  if status == "ok" and ext == ".nfp" then
+    local coverDir = fs.getDir(detail)
+    local cover = fs.combine(coverDir, "cover.nfp")
     if not fs.exists(cover) then
       writeBytes(cover, data)
     end
   end
-  return "ok", hit, beside
+  return status, hit, detail
 end
 
 ------------------------------------------------------------------ dropped files
@@ -1044,7 +1121,7 @@ local function handleDrop(files, artist, album)
       else
         pendingLrc[#pendingLrc + 1] = { name = name, data = data }
       end
-    elseif lower:match("%.cvid$") then
+    elseif lower:match("%.cvid%.%d+$") or lower:match("%.cvid$") then
       local okRead, data = pcall(f.readAll)
       if f.close then pcall(f.close) end
       if not okRead or not data or #data == 0 then
@@ -1084,24 +1161,24 @@ local function handleDrop(files, artist, album)
       say(string.format("LRC miss: %s (no .dfpwm for \"%s\")", item.name, tostring(detail)), colours.orange)
       say("  Tip: import the song first, or run sort-music --apply --lyrics-only for bulk orphans.", colours.lightGrey)
     elseif status == "full" then
-      say(string.format("LRC matched %s but disk full for %s", hit and hit.base or "?", detail), colours.red)
+      say(string.format("LRC matched %s but every disk is full for %s", hit and hit.base or "?", detail), colours.red)
     else
       say(string.format("LRC error: %s — %s", item.name, tostring(detail)), colours.red)
     end
   end
 
-  -- Pass 3: .cvid beside matching .dfpwm
+  -- Pass 3: .cvid / .cvid.N beside matching .dfpwm (spill across disks)
   for _, item in ipairs(pendingCvid) do
     local status, hit, detail = storeCvid(artist, album, item.name, item.data, batchAudio)
     if status == "ok" then
       say(string.format("CVID: %s -> %s", item.name, detail), colours.lime)
     elseif status == "duplicate" then
-      say(string.format("CVID already beside track: %s (%s)", detail, item.name), colours.lightGrey)
+      say(string.format("CVID already present: %s (%s)", detail, item.name), colours.lightGrey)
     elseif status == "miss" then
       say(string.format("CVID miss: %s (no .dfpwm for \"%s\")", item.name, tostring(detail)), colours.orange)
       say("  Tip: import the song first, or drop Song.dfpwm + Song.cvid together.", colours.lightGrey)
     elseif status == "full" then
-      say(string.format("CVID matched %s but disk full for %s", hit and hit.base or "?", detail), colours.red)
+      say(string.format("CVID matched %s but every disk is full for %s", hit and hit.base or "?", detail), colours.red)
     else
       say(string.format("CVID error: %s — %s", item.name, tostring(detail)), colours.red)
     end

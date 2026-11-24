@@ -18,8 +18,9 @@
     • the .dfpwm
     • matching .lrc beside it
     • optional /lyrics (and diskN/lyrics) mirror for that song
+    • matching .cvid / multipart .cvid.1/.2/.3 (beside or spilled across mounts)
 
-  Album delete removes every track in that album (+ their .lrc mirrors),
+  Album delete removes every track in that album (+ their .lrc / .cvid packs),
   then prunes empty album/artist dirs (never mounts, never sfx/).
 
   Never touches /sfx, rom, or files outside the chosen tracks.
@@ -38,7 +39,7 @@ for _, a in ipairs(rawArgs) do
     print("delete-music [--dry-run]")
     print("  Pick Artist → Album → Song, or DELETE ALBUM.")
     print("  Real deletes always ask for y/yes. --dry-run only prints what would go.")
-    print("  Removes .dfpwm + beside .lrc + optional /lyrics mirror. Never touches sfx/.")
+    print("  Removes .dfpwm + .lrc + .cvid/.cvid.N packs (+ /lyrics mirrors). Never touches sfx/.")
     return
   end
 end
@@ -330,6 +331,76 @@ local function lrcCandidates(track)
   return list
 end
 
+-- .cvid + multipart .cvid.1/.2/… beside the song and under same Artist/Album on every root.
+local function cvidCandidates(track)
+  if not track or not track.path then return {} end
+  local path = track.path
+  local base = fs.getName(path):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local artist, album = track.artist or "", track.album or ""
+  local names = { base .. ".cvid", base .. ".CVID" }
+  for i = 1, 8 do
+    names[#names + 1] = base .. ".cvid." .. tostring(i)
+    names[#names + 1] = base .. ".CVID." .. tostring(i)
+  end
+  local dirs, seen = {}, {}
+  local function addDir(d)
+    if d and d ~= "" and not seen[d] then
+      seen[d] = true
+      dirs[#dirs + 1] = d
+    end
+  end
+  addDir(fs.getDir(path))
+  if artist ~= "" and album ~= "" then
+    for _, root in ipairs(ROOTS) do
+      addDir(fs.combine(root, artist, album))
+      addDir(fs.combine(root, artist .. " - " .. album))
+    end
+  end
+  local list = {}
+  for _, dir in ipairs(dirs) do
+    for _, name in ipairs(names) do
+      list[#list + 1] = fs.combine(dir, name)
+    end
+  end
+  return list
+end
+
+local function existingSidecars(track)
+  local out, seen = {}, {}
+  local function addExisting(p)
+    if not p or seen[p] then return end
+    if fs.exists(p) and not fs.isDir(p) then
+      seen[p] = true
+      out[#out + 1] = p
+    end
+  end
+  for _, p in ipairs(lrcCandidates(track)) do addExisting(p) end
+  for _, p in ipairs(cvidCandidates(track)) do addExisting(p) end
+  return out
+end
+
+local function trackListLabel(track)
+  local bits = { track.title }
+  local sidecars = existingSidecars(track)
+  local hasLrc, cvidParts = false, 0
+  for _, p in ipairs(sidecars) do
+    local lower = p:lower()
+    if lower:match("%.lrc$") then
+      hasLrc = true
+    elseif lower:match("%.cvid%.%d+$") or lower:match("%.cvid$") then
+      cvidParts = cvidParts + 1
+    end
+  end
+  if hasLrc then bits[#bits + 1] = "lrc" end
+  if cvidParts == 1 then
+    bits[#bits + 1] = "cvid"
+  elseif cvidParts > 1 then
+    bits[#bits + 1] = "cvid×" .. tostring(cvidParts)
+  end
+  if #bits == 1 then return track.title end
+  return track.title .. "  [" .. table.concat(bits, ", ", 2) .. "]"
+end
+
 ------------------------------------------------------------------ delete helpers
 local MOUNT_NAMES = { music = true, disk = true, disk1 = true, lyrics = true }
 for _, m in ipairs(listFloppyMounts()) do MOUNT_NAMES[m] = true end
@@ -405,12 +476,8 @@ local function collectTrackFiles(track)
     files[#files + 1] = p
   end
   add(track.path)
-  for _, p in ipairs(lrcCandidates(track)) do
-    if fs.exists(p) and not fs.isDir(p) then
-      add(p)
-    elseif opts.dryRun then
-      -- only list mirrors that exist; dry-run still only shows real candidates
-    end
+  for _, p in ipairs(existingSidecars(track)) do
+    add(p)
   end
   return files
 end
@@ -596,9 +663,9 @@ while true do
         if item.__deleteAlbum then
           return "*** DELETE ALBUM (" .. #album.tracks .. " songs) ***"
         end
-        return item.title
+        return trackListLabel(item)
       end,
-      { "Songs:" }
+      { "Songs:  [lrc] / [cvid] / [cvid×N] mark sidecars that will be removed" }
     )
     if cWhy == "quit" then
       artists = nil
@@ -621,7 +688,7 @@ while true do
         print(string.format("  … +%d more", #album.tracks - 8))
       end
       print("")
-      print("Also removes beside .lrc and /lyrics mirrors for those songs.")
+      print("Also removes .lrc, .cvid/.cvid.N packs, and /lyrics mirrors for those songs.")
       print("Empty album/artist folders are pruned afterward.")
       print("")
       if opts.dryRun then
@@ -671,7 +738,7 @@ while true do
         print("  - " .. p)
       end
       if #files == 1 then
-        print("  (no .lrc / lyrics mirror found)")
+        print("  (no .lrc / .cvid sidecars found)")
       end
       print("")
       if opts.dryRun then

@@ -2378,6 +2378,22 @@ function Art.albumSource(album)
   end
   local auto = Art.autoCover(album.folder)
   if auto then return auto, auto end
+  -- Cover may have spilled onto another mount's Artist/Album copy.
+  local artist = album.artistOverride or album.folderArtist or (album.tracks and album.tracks[1] and album.tracks[1].artist)
+  local name = album.name
+  if artist and name then
+    for _, root in ipairs(App.cfg and App.cfg.roots or {}) do
+      for _, dir in ipairs({
+        fs.combine(root, artist, name),
+        fs.combine(root, artist .. " - " .. name),
+      }) do
+        if dir ~= album.folder and fs.exists(dir) and fs.isDir(dir) then
+          local spilled = Art.autoCover(dir)
+          if spilled then return spilled, spilled end
+        end
+      end
+    end
+  end
   return nil, "gen:album:" .. album.key
 end
 
@@ -3095,8 +3111,14 @@ function Lrc.candidates(track)
   local cleanTitle = Util.clean(track.title):gsub("[/\\:*?\"<>|]", "_")
   local names = { base .. ".lrc", base .. ".LRC", base .. ".txt", base .. ".TXT", cleanTitle .. ".lrc", cleanTitle .. ".LRC", cleanTitle .. ".txt", cleanTitle .. ".TXT" }
   local dirs = { folder, fs.combine(folder, "lyrics"), fs.combine(folder, "Lyrics"), fs.combine(Store.dir or ".aurora", "lyrics") }
+  local artist, album = track.artist, track.album or track.albumName
   for _, root in ipairs(App.cfg.roots or {}) do
     dirs[#dirs + 1] = fs.combine(root, "lyrics")
+    if artist and album then
+      dirs[#dirs + 1] = fs.combine(root, artist, album)
+      dirs[#dirs + 1] = fs.combine(root, artist .. " - " .. album)
+      dirs[#dirs + 1] = fs.combine(root, "lyrics", artist, album)
+    end
   end
   local seen = {}
   for _, dir in ipairs(dirs) do
@@ -4721,9 +4743,13 @@ end
 --   frameCount fixed-size frames (2 bytes per cell), duration table (u16 each).
 -- Each cell is [mask 0..31][fg high nibble, bg low nibble].  The mask uses the
 -- same 2x3 sextant geometry as the rest of AURORA.
+-- Multipart: Song.cvid.1/.2/.3 (each a full CVID1 slice ≤ ~20 MiB). Player keeps
+-- one part in RAM and seamless-loads the next when the frame crosses a boundary.
+-- Single-file Song.cvid still works (≤20 MiB fallback, e.g. 160×45).
 Video = {}
 Video.magic = "CVID1"
 Video.headerSize = 64
+Video.maxPartBytes = 20 * 1024 * 1024
 Video.loaded = false
 Video.playing = false
 Video.fullscreen = false
@@ -4735,6 +4761,9 @@ Video.cells = {}
 Video.cacheFrame = 0
 Video.files = {}
 Video.error = nil
+Video.parts = nil
+Video.partIndex = 0
+Video.partFrame0 = 1
 
 local function u16(s, i) return (s:byte(i) or 0) + (s:byte(i + 1) or 0) * 256 end
 local function u32(s, i)
@@ -4750,6 +4779,89 @@ local function rgbSlot(r, g, b)
   return best
 end
 
+local function isCvidPath(p)
+  local lower = tostring(p or ""):lower()
+  return lower:match("%.cvid$") ~= nil or lower:match("%.cvid%.%d+$") ~= nil
+end
+
+local function cvidPartIndex(path)
+  local lower = tostring(path or ""):lower()
+  local n = lower:match("%.cvid%.(%d+)$")
+  if n then return tonumber(n) end
+  if lower:match("%.cvid$") then return 0 end
+  return nil
+end
+
+local function cvidStemPath(path)
+  local p = tostring(path or "")
+  local stem = p:gsub("%.[Cc][Vv][Ii][Dd]%.%d+$", ""):gsub("%.[Cc][Vv][Ii][Dd]$", "")
+  return stem
+end
+
+local function readCvidHeader(path)
+  local ok, f = pcall(fs.open, path, "rb")
+  if not ok or not f then return nil, "Cannot read video" end
+  local ok2, hdr = pcall(function() return f.read(Video.headerSize) end)
+  pcall(function() f.close() end)
+  if not ok2 or not hdr or #hdr < Video.headerSize then return nil, "Cannot read video" end
+  if hdr:sub(1, 5) ~= Video.magic then return nil, "Not a CVID1 file" end
+  if (hdr:byte(6) or 0) ~= 1 then return nil, "Unsupported CVID version" end
+  local w, h = u16(hdr, 7), u16(hdr, 9)
+  local frames = u32(hdr, 11)
+  local defaultMs = u16(hdr, 15)
+  if w < 1 or h < 1 or w > 320 or h > 120 or frames < 1 or frames > 30000 then
+    return nil, "Invalid video dimensions"
+  end
+  local palette = {}
+  for i = 0, 15 do
+    local o = 17 + i * 3
+    palette[i] = rgbSlot(hdr:byte(o) or 0, hdr:byte(o + 1) or 0, hdr:byte(o + 2) or 0)
+  end
+  return {
+    path = path,
+    w = w,
+    h = h,
+    frames = frames,
+    defaultMs = defaultMs > 0 and defaultMs or 100,
+    cellBytes = w * h * 2,
+    palette = palette,
+  }
+end
+
+local function discoverCvidParts(path)
+  local idx = cvidPartIndex(path)
+  if idx == nil then return nil, "Not a CVID1 file" end
+  if idx == 0 then
+    -- Single Song.cvid (ignore stray .cvid.N siblings for this open).
+    local meta, err = readCvidHeader(path)
+    if not meta then return nil, err end
+    meta.frame0 = 1
+    return { meta }, nil
+  end
+  local stem = cvidStemPath(path)
+  local parts, totalFrames = {}, 0
+  for i = 1, 32 do
+    local cand = stem .. ".cvid." .. tostring(i)
+    if not fs.exists(cand) or fs.isDir(cand) then
+      if i == 1 then return nil, "Cannot read video" end
+      break
+    end
+    local meta, err = readCvidHeader(cand)
+    if not meta then return nil, err or ("Bad part " .. i) end
+    if i > 1 then
+      local first = parts[1]
+      if meta.w ~= first.w or meta.h ~= first.h then
+        return nil, "CVID part size mismatch"
+      end
+    end
+    meta.frame0 = totalFrames + 1
+    totalFrames = totalFrames + meta.frames
+    parts[#parts + 1] = meta
+  end
+  if #parts == 0 then return nil, "Cannot read video" end
+  return parts, nil
+end
+
 function Video.close()
   Video.data = nil
   Video.loaded = false
@@ -4759,57 +4871,109 @@ function Video.close()
   Video.cacheFrame = 0
   Video.position = 0
   Video.frame = 1
+  Video.parts = nil
+  Video.partIndex = 0
+  Video.partFrame0 = 1
+  Video.partFrames = 0
+end
+
+local function applyPartData(meta, data)
+  if not data or #data < Video.headerSize then return false, "Cannot read video" end
+  if #data > Video.maxPartBytes then return false, "Video file is too large" end
+  if data:sub(1, 5) ~= Video.magic then return false, "Not a CVID1 file" end
+  local frames = u32(data, 11)
+  local defaultMs = u16(data, 15)
+  if defaultMs <= 0 then defaultMs = meta.defaultMs or 100 end
+  local cellBytes = meta.cellBytes
+  local durationAt = Video.headerSize + frames * cellBytes + 1
+  if #data < durationAt + frames * 2 - 1 then return false, "Truncated CVID file" end
+  Video.data = data
+  Video.durationAt = durationAt
+  Video.partFrames = frames
+  Video.defaultMs = defaultMs
+  -- Patch this part's durations into the global timeline (encoder uses constant ms).
+  local frame0 = meta.frame0 or 1
+  for i = 1, frames do
+    local g = frame0 + i - 1
+    local ms = u16(data, durationAt + (i - 1) * 2)
+    if ms <= 0 then ms = defaultMs end
+    Video.durations[g] = ms
+  end
+  return true
+end
+
+function Video.ensurePart(globalFrame)
+  if not Video.parts or #Video.parts == 0 then return false end
+  globalFrame = Util.clamp(globalFrame or 1, 1, Video.frames)
+  local partIndex = 1
+  for i, meta in ipairs(Video.parts) do
+    local last = meta.frame0 + meta.frames - 1
+    if globalFrame >= meta.frame0 and globalFrame <= last then
+      partIndex = i
+      break
+    end
+    if globalFrame >= meta.frame0 then partIndex = i end
+  end
+  if Video.partIndex == partIndex and Video.data then
+    Video.partFrame0 = Video.parts[partIndex].frame0
+    return true
+  end
+  local meta = Video.parts[partIndex]
+  local data = Store.readRaw(meta.path)
+  local ok, err = applyPartData(meta, data)
+  if not ok then
+    Video.error = err
+    return false
+  end
+  Video.partIndex = partIndex
+  Video.partFrame0 = meta.frame0
+  Video.path = meta.path
+  Video.cacheFrame = 0
+  return true
 end
 
 function Video.load(path)
-  local data = Store.readRaw(path)
-  if not data or #data < Video.headerSize then Video.error = "Cannot read video"; return false end
-  -- 48 MiB allows ~256×72 @ 8 fps for ~2.5 min tracks (default encode / Escape).
-  if #data > 48 * 1024 * 1024 then Video.error = "Video file is too large"; return false end
-  if data:sub(1, 5) ~= Video.magic then Video.error = "Not a CVID1 file"; return false end
-  local version = data:byte(6) or 0
-  if version ~= 1 then Video.error = "Unsupported CVID version"; return false end
-  local w, h = u16(data, 7), u16(data, 9)
-  local frames = u32(data, 11)
-  local defaultMs = u16(data, 15)
-  -- Cap above wall (~270×60); default packs use 256×72 under the size budget.
-  if w < 1 or h < 1 or w > 320 or h > 120 or frames < 1 or frames > 30000 then
+  local parts, err = discoverCvidParts(path)
+  if not parts then Video.error = err or "Cannot read video"; return false end
+  local first = parts[1]
+  local totalFrames = 0
+  for _, meta in ipairs(parts) do totalFrames = totalFrames + meta.frames end
+  if totalFrames < 1 or totalFrames > 30000 then
     Video.error = "Invalid video dimensions"
     return false
   end
-  local cellBytes = w * h * 2
-  local durationAt = Video.headerSize + frames * cellBytes + 1
-  if #data < durationAt + frames * 2 - 1 then Video.error = "Truncated CVID file"; return false end
-  local palette = {}
-  for i = 0, 15 do
-    local o = 17 + i * 3
-    palette[i] = rgbSlot(data:byte(o) or 0, data:byte(o + 1) or 0, data:byte(o + 2) or 0)
-  end
   local durations, starts, total = {}, {}, 0
-  for i = 1, frames do
-    local ms = u16(data, durationAt + (i - 1) * 2)
-    if ms <= 0 then ms = defaultMs > 0 and defaultMs or 100 end
-    durations[i] = ms
-    starts[i] = total
-    total = total + ms
+  local g = 1
+  for _, meta in ipairs(parts) do
+    for _ = 1, meta.frames do
+      local ms = meta.defaultMs
+      durations[g] = ms
+      starts[g] = total
+      total = total + ms
+      g = g + 1
+    end
   end
-  starts[frames + 1] = total
-  Video.data = data
-  Video.path = path
-  Video.w, Video.h = w, h
-  Video.frames = frames
-  Video.cellBytes = cellBytes
-  Video.frameSize = cellBytes
-  Video.durationAt = durationAt
-  Video.defaultMs = defaultMs
+  starts[totalFrames + 1] = total
+  Video.parts = parts
+  Video.w, Video.h = first.w, first.h
+  Video.frames = totalFrames
+  Video.cellBytes = first.cellBytes
+  Video.frameSize = first.cellBytes
+  Video.palette = first.palette
   Video.durations = durations
   Video.starts = starts
   Video.total = total
-  Video.palette = palette
+  Video.defaultMs = first.defaultMs
   Video.position = 0
   Video.frame = 1
   Video.cacheFrame = 0
   Video.playing = false
+  Video.partIndex = 0
+  Video.data = nil
+  if not Video.ensurePart(1) then
+    Video.loaded = false
+    return false
+  end
   Video.loaded = true
   Video.error = nil
   return true
@@ -4891,9 +5055,13 @@ end
 
 function Video.decode()
   if not Video.loaded or Video.cacheFrame == Video.frame then return end
+  if Video.ensurePart and not Video.ensurePart(Video.frame) then return end
+  local localFrame = Video.frame - (Video.partFrame0 or 1) + 1
+  if localFrame < 1 then localFrame = 1 end
   local cells = {}
-  local base = Video.headerSize + (Video.frame - 1) * Video.frameSize
+  local base = Video.headerSize + (localFrame - 1) * Video.frameSize
   local data = Video.data
+  if not data then return end
   local n = 0
   for cy = 1, Video.h do
     for cx = 1, Video.w do
@@ -4962,7 +5130,10 @@ function Video.scanFiles()
     dirs[#dirs + 1] = fs.combine(root, "videos")
   end
   local function add(p)
-    if not seen[p] and fs.exists(p) and not fs.isDir(p) and p:lower():match("%.cvid$") then
+    if seen[p] or not fs.exists(p) or fs.isDir(p) then return end
+    local lower = p:lower()
+    -- List single .cvid or multipart starters (.cvid.1); skip .cvid.2+.
+    if lower:match("%.cvid%.1$") or lower:match("%.cvid$") then
       seen[p] = true
       out[#out + 1] = p
     end
@@ -4996,35 +5167,84 @@ end
 
 ------------------------------------------------------------------ music-video handoff (CTJP-12)
 -- Play the normal now-playing UI first; after videoDelaySec, switch THIS
--- monitor to the sibling .cvid while DFPWM audio keeps running.  Right-click
--- (or SONG) dismisses back to the song screen for the rest of the track.
--- NEXT/BACK keep video mode when the neighbour track also has a .cvid.
+-- monitor to the sibling .cvid (or .cvid.1 multipart) while DFPWM keeps
+-- running. If no .cvid, fall back to album cover.nfp on the main monitor.
+-- Right-click / SONG → song UI; after ~videoDelaySec idle (incl. while
+-- flipping tracks), re-trigger video or cover for the current song.
+-- NEXT/BACK keep overlay mode across neighbours (video if pack, else cover).
 Video.musicActive = false
 Video.musicArmed = false
-Video.musicDismissed = false
 Video.musicStay = false
 Video.musicTrackPath = nil
+Video.overlay = nil -- nil | "video" | "cover"
+Video.dismissedUntilIdle = false
+Video.lastInputAt = nil
+Video.hasCvid = false
 
-function Video.cvidBeside(dfpwmPath)
+function Video.cvidBeside(dfpwmPath, track)
   if type(dfpwmPath) ~= "string" or dfpwmPath == "" then return nil end
-  local base = dfpwmPath:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
-  local candidates = { base .. ".cvid", base .. ".CVID" }
-  for _, p in ipairs(candidates) do
-    if fs.exists(p) and not fs.isDir(p) then return p end
+  local stem = fs.getName(dfpwmPath:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", ""))
+  local names = {
+    stem .. ".cvid", stem .. ".CVID",
+    stem .. ".cvid.1", stem .. ".CVID.1",
+  }
+  local dirs, seen = {}, {}
+  local function addDir(d)
+    if type(d) == "string" and d ~= "" and not seen[d] then
+      seen[d] = true
+      dirs[#dirs + 1] = d
+    end
+  end
+  addDir(fs.getDir(dfpwmPath))
+  if track then
+    addDir(track.folder)
+    local artist, album = track.artist, track.album or track.albumName
+    if artist and album then
+      for _, root in ipairs(App.cfg and App.cfg.roots or {}) do
+        addDir(fs.combine(root, artist, album))
+        addDir(fs.combine(root, artist .. " - " .. album))
+      end
+    end
+  end
+  for _, dir in ipairs(dirs) do
+    for _, name in ipairs(names) do
+      local p = fs.combine(dir, name)
+      if fs.exists(p) and not fs.isDir(p) then return p end
+    end
   end
   return nil
+end
+
+function Video.hasCoverArt(track)
+  if not track or not Art then return false end
+  local path = select(1, Art.trackSource(track))
+  if type(path) == "string" and fs.exists(path) and not fs.isDir(path) then return true end
+  if track.albumRef then
+    path = select(1, Art.albumSource(track.albumRef))
+    if type(path) == "string" and fs.exists(path) and not fs.isDir(path) then return true end
+  end
+  return false
 end
 
 function Video.clearMusic()
   Video.musicActive = false
   Video.musicArmed = false
-  Video.musicDismissed = false
   Video.musicTrackPath = nil
   Video.musicStay = false
-  if Video.loaded and Video.path and tostring(Video.path):lower():match("%.cvid$") then
+  Video.overlay = nil
+  Video.dismissedUntilIdle = false
+  Video.lastInputAt = nil
+  Video.hasCvid = false
+  if Video.loaded and Video.path and isCvidPath(Video.path) then
     -- Only close when we were driving a music-video pack (leave standalone Video app alone
     -- if the user opened a different file on the Video screen).
     if App.screen ~= "video" then Video.close() end
+  end
+end
+
+function Video.noteInput()
+  if Video.dismissedUntilIdle and not Video.musicActive then
+    Video.lastInputAt = Util.now()
   end
 end
 
@@ -5033,34 +5253,63 @@ function Video.syncToAudio()
   local ms = math.floor((Audio.position() or 0) * 1000 + 0.5)
   Video.position = Util.clamp(ms, 0, Video.total or 0)
   Video.frame = Video.frameFor(Video.position)
+  if Video.ensurePart then Video.ensurePart(Video.frame) end
   Video.cacheFrame = 0
   Video.playing = false
   Video.lastNow = nil
 end
 
+function Video.activateOverlay()
+  Video.dismissedUntilIdle = false
+  if Video.hasCvid and Video.loaded then
+    Video.overlay = "video"
+    Video.musicActive = true
+    Video.syncToAudio()
+  elseif Player.cur and Video.hasCoverArt(Player.cur) then
+    Video.overlay = "cover"
+    Video.musicActive = true
+    if App.screen ~= "video" and Video.loaded then Video.close() end
+  else
+    Video.overlay = nil
+    Video.musicActive = false
+    return false
+  end
+  UI.request(true)
+  return true
+end
+
 function Video.armForTrack(track, opts)
   opts = opts or {}
   local stay = opts.stay == true
-  Video.musicDismissed = false
   Video.musicTrackPath = track and track.path or nil
   Video.musicArmed = false
   Video.musicActive = false
+  Video.overlay = nil
+  Video.hasCvid = false
   if not track or not App.cfg or App.cfg.musicVideo == false then
     if App.screen ~= "video" then Video.close() end
+    Video.dismissedUntilIdle = false
     return false
   end
-  local path = Video.cvidBeside(track.path)
-  if not path then
+  local path = Video.cvidBeside(track.path, track)
+  if path and Video.load(path) then
+    Video.hasCvid = true
+  else
     if App.screen ~= "video" then Video.close() end
-    return false
+    Video.hasCvid = false
   end
-  if not Video.load(path) then
+  -- Arm even without .cvid so cover.nfp can take over after the delay.
+  if not Video.hasCvid and not Video.hasCoverArt(track) then
+    Video.dismissedUntilIdle = false
     return false
   end
   Video.musicArmed = true
-  if stay then
-    Video.musicActive = true
-    Video.syncToAudio()
+  if stay and not Video.dismissedUntilIdle then
+    return Video.activateOverlay()
+  end
+  if Video.dismissedUntilIdle then
+    -- Flipping tracks after SONG/right-click: wait idle, then re-trigger.
+    Video.lastInputAt = Util.now()
   end
   return true
 end
@@ -5068,27 +5317,34 @@ end
 function Video.dismissMusic()
   if not Video.musicActive then return false end
   Video.musicActive = false
-  Video.musicDismissed = true
+  Video.overlay = nil
+  Video.dismissedUntilIdle = true
+  Video.lastInputAt = Util.now()
   UI.request(true)
   return true
 end
 
 function Video.musicTick()
-  if not Video.musicArmed or Video.musicDismissed then return end
+  if not Video.musicArmed then return end
   if not Player.cur or Player.paused then return end
   if App.cfg and App.cfg.musicVideo == false then return end
   if Video.musicActive then
-    local before = Video.frame
-    Video.syncToAudio()
-    if Video.frame ~= before then UI.request() end
+    if Video.overlay == "video" and Video.loaded then
+      local before = Video.frame
+      Video.syncToAudio()
+      if Video.frame ~= before then UI.request() end
+    end
     return
   end
   local delay = tonumber(App.cfg and App.cfg.videoDelaySec) or 3.5
-  if (Audio.position() or 0) >= delay then
-    Video.musicActive = true
-    Video.syncToAudio()
-    UI.request(true)
+  local ready
+  if Video.dismissedUntilIdle then
+    local last = Video.lastInputAt or Util.now()
+    ready = (Util.now() - last) >= delay
+  else
+    ready = (Audio.position() or 0) >= delay
   end
+  if ready then Video.activateOverlay() end
 end
 
 --======== 87_apps.lua ========
@@ -5305,6 +5561,7 @@ end
 
 function UI.tap(x, y)
   Auth.touch()
+  if Video and Video.noteInput then Video.noteInput() end
   UI.feedbackAt(x, y)
   local blocking = UI.keyboard ~= nil or UI.modal ~= nil
   for i = #UI.hits, 1, -1 do
@@ -6880,6 +7137,36 @@ function Screens.homeIdle(m)
   end
 end
 
+function Screens.musicOverlayBar()
+  -- BACK | title (fits gap) | SONG | NEXT — SONG stays right of title (no overlap).
+  local w, h = Canvas.w, Canvas.h
+  local barH = 4
+  local y = h - barH + 1
+  Canvas:fill(1, y, w, barH, Theme.C.surface)
+  local title = Player.cur and Player.cur.title or "VIDEO"
+  UI.button(2, y, 9, 3, "BACK", {
+    variant = "surface",
+    fn = function()
+      Video.musicStay = true
+      Player.prev()
+    end,
+  })
+  UI.button(math.max(12, w - 20), y, 9, 3, "SONG", {
+    variant = "primary",
+    fn = function() Video.dismissMusic() end,
+  })
+  UI.button(math.max(21, w - 10), y, 9, 3, "NEXT", {
+    variant = "surface",
+    fn = function()
+      Video.musicStay = true
+      Player.next(false)
+    end,
+  })
+  local titleX = 12
+  local titleW = math.max(8, (w - 20) - titleX - 1)
+  Canvas:textFit(titleX, y + 1, titleW, title, Theme.C.muted, Theme.C.surface)
+end
+
 function Screens.musicVideo()
   -- Full-bleed video on the same main monitor; audio continues via Audio.*.
   local w, h = Canvas.w, Canvas.h
@@ -6890,34 +7177,41 @@ function Screens.musicVideo()
   else
     Canvas:textCenter(1, math.floor(h / 2), w, "NO VIDEO", Theme.C.text, Theme.C.bg)
   end
-  Canvas:fill(1, h - barH + 1, w, barH, Theme.C.surface)
-  local title = Player.cur and Player.cur.title or "VIDEO"
-  Canvas:textCenter(12, h - barH + 2, math.max(8, w - 24), Util.fit(title, math.max(8, w - 24)), Theme.C.muted, Theme.C.surface)
-  -- Bottom: BACK + SONG (exit video) + NEXT. Stay in video mode across packs.
-  UI.button(2, h - barH + 1, 9, 3, "BACK", {
-    variant = "surface",
-    fn = function()
-      Video.musicStay = true
-      Player.prev()
-    end,
-  })
-  UI.button(math.max(12, math.floor(w / 2) - 4), h - barH + 1, 9, 3, "SONG", {
-    variant = "primary",
-    fn = function() Video.dismissMusic() end,
-  })
-  UI.button(w - 10, h - barH + 1, 9, 3, "NEXT", {
-    variant = "surface",
-    fn = function()
-      Video.musicStay = true
-      Player.next(false)
-    end,
-  })
+  Screens.musicOverlayBar()
+end
+
+function Screens.musicCover()
+  -- No .cvid: full-bleed album cover.nfp after the handoff delay.
+  local w, h = Canvas.w, Canvas.h
+  local barH = 4
+  local bodyH = math.max(1, h - barH)
+  Canvas:fill(1, 1, w, h, Theme.C.bg)
+  if Player.cur and Art then
+    local side = math.min(w, bodyH)
+    local art = Art.forTrack(Player.cur, side, side)
+    if art then
+      local ox = math.floor((w - side) / 2) + 1
+      local oy = math.floor((bodyH - side) / 2) + 1
+      Canvas:art(art, ox, oy)
+    else
+      Canvas:textCenter(1, math.floor(bodyH / 2), w, "NO COVER", Theme.C.text, Theme.C.bg)
+    end
+  else
+    Canvas:textCenter(1, math.floor(bodyH / 2), w, "NO COVER", Theme.C.text, Theme.C.bg)
+  end
+  Screens.musicOverlayBar()
 end
 
 function Screens.music()
-  if Video.musicActive and Video.loaded and Player.cur then
-    Screens.musicVideo()
-    return
+  if Video.musicActive and Player.cur then
+    if Video.overlay == "cover" then
+      Screens.musicCover()
+      return
+    end
+    if Video.loaded or Video.overlay == "video" then
+      Screens.musicVideo()
+      return
+    end
   end
   local m = UI.frame({ title = "", tab = "music", mini = false })
   if Player.cur then

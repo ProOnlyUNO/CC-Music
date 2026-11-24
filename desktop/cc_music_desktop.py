@@ -1015,9 +1015,10 @@ class App(tk.Tk):
             vid,
             text=(
                 f"Offline encode for CC monitors (default {video_core.DEFAULT_CELLS_W}×"
-                f"{video_core.DEFAULT_CELLS_H} @ {video_core.DEFAULT_FPS} fps). Writes Song.cvid + "
-                "Song.dfpwm with the same stem — drop both via Importer beside the album. "
-                "Jukebox plays the song UI first, then switches this monitor to the video after ~3.5s."
+                f"{video_core.DEFAULT_CELLS_H} @ {video_core.DEFAULT_FPS} fps). Writes Song.dfpwm + "
+                f"Song.cvid (or .cvid.1/.2/… when over ~{video_core.MAX_PART_BYTES // 1048576} MiB). "
+                f"Single-file fallback: {video_core.SINGLE_FILE_CELLS_W}×{video_core.SINGLE_FILE_CELLS_H}. "
+                "Drop via Importer; jukebox handoff after ~3.5s (cover.nfp if no video)."
             ),
             wraplength=740,
             style="Dim.TLabel",
