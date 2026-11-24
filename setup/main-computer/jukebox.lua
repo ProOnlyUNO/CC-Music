@@ -3620,9 +3620,14 @@ end
 
 -- speaker.stop() only sets a flag; the server clears dfpwmState on the next
 -- tick. playAudio before that either sees a full buffer (returns false) or
--- queues audio that the pending stop then wipes. Yield one tick after stop.
+-- queues audio that the pending stop then wipes.
+--
+-- NEVER sleep()/pullEvent here: nested yields inside App.tick eat the main
+-- timer (and other events), which stalls Audio.tick and breaks next-song
+-- advance. Wait is expressed as Audio._kickWait ticks instead.
 function Audio.yieldForStop()
-  sleep(0)
+  -- Intentionally empty. Callers that just stopped speakers must arm
+  -- Audio.armKickstart(..., true) so the next Audio.tick waits one frame.
 end
 
 function Audio.effectiveVolume()
@@ -3682,29 +3687,67 @@ function Audio.loadTrack(track, sec)
   return Audio.resetStream(Audio.pos)
 end
 
--- Pump + brief yields until the first PCM chunk is accepted (or we give up).
-function Audio.kickstart(maxTries)
-  maxTries = maxTries or 12
-  local lastErr = "could not start playback"
-  for try = 1, maxTries do
-    if Audio.liveCount() == 0 then
-      return false, "no speakers attached"
-    end
-    Audio.pump(1)
-    if Audio.started then
-      return true
-    end
-    if Audio.eof and not Audio.pending then
-      if Audio.reason and Audio.reason ~= "" and Audio.reason ~= "cc.audio.dfpwm ready" then
-        return false, Audio.reason
-      end
-      return false, "empty or invalid audio"
-    end
-    lastErr = "could not start playback"
-    -- Wait for stop to apply / buffer to drain, then retry (pre-Aurora pushAudio).
-    sleep(0)
+-- Arm a non-blocking kickstart. Each Audio.tick pumps once until started or
+-- tries are exhausted. waitOneTick=true after speaker.stop() so the server
+-- can clear dfpwmState before the first playAudio.
+function Audio.armKickstart(maxTries, waitOneTick)
+  Audio._kickTries = maxTries or 12
+  Audio._kickWait = waitOneTick and 1 or 0
+  Audio._kickFail = nil
+end
+
+function Audio.clearKickstart()
+  Audio._kickTries = 0
+  Audio._kickWait = 0
+end
+
+-- One pump attempt for an armed kickstart. Returns "pending", "ok", or "fail".
+function Audio.kickstartStep()
+  if not Audio._kickTries or Audio._kickTries <= 0 then return "ok" end
+  if Audio.paused or not Audio.track or not Audio.fh then
+    Audio.clearKickstart()
+    return "fail"
   end
-  return false, lastErr
+  if Audio._kickWait and Audio._kickWait > 0 then
+    Audio._kickWait = Audio._kickWait - 1
+    return "pending"
+  end
+  if Audio.liveCount() == 0 then
+    Audio._kickFail = "no speakers attached"
+    Audio.clearKickstart()
+    Audio.paused = true
+    return "fail"
+  end
+  Audio.pump(1)
+  if Audio.started then
+    Audio.clearKickstart()
+    Audio._kickFail = nil
+    return "ok"
+  end
+  if Audio.eof and not Audio.pending then
+    if Audio.reason and Audio.reason ~= "" and Audio.reason ~= "cc.audio.dfpwm ready" then
+      Audio._kickFail = Audio.reason
+    else
+      Audio._kickFail = "empty or invalid audio"
+    end
+    Audio.clearKickstart()
+    Audio.paused = true
+    return "fail"
+  end
+  Audio._kickTries = Audio._kickTries - 1
+  if Audio._kickTries <= 0 then
+    Audio._kickFail = "could not start playback"
+    Audio.clearKickstart()
+    Audio.paused = true
+    return "fail"
+  end
+  return "pending"
+end
+
+-- Legacy sync name: arm only (no nested sleep). Actual start happens in tick.
+function Audio.kickstart(maxTries)
+  Audio.armKickstart(maxTries or 12, false)
+  return true
 end
 
 function Audio.playTrack(track, from, silent)
@@ -3714,16 +3757,16 @@ function Audio.playTrack(track, from, silent)
   if Audio.liveCount() == 0 then return false, "no speakers attached" end
   Audio.track = track
   Audio.paused = true
+  Audio.clearKickstart()
+  Audio._pendingAdvance = false
   Audio.stopSpeakers()
-  Audio.yieldForStop()
   local ok, err = Audio.resetStream(from or 0)
   if not ok then return false, err end
   Audio.paused = false
-  ok, err = Audio.kickstart(12)
-  if not ok then
-    Audio.paused = true
-    return false, err or "could not start playback"
-  end
+  -- Defer first playAudio one tick so stop() has cleared the speaker buffer.
+  -- Queue a wake event so kickstart still runs if the main timer was lost.
+  Audio.armKickstart(12, true)
+  os.queueEvent("speaker_audio_empty")
   Audio.viz.active = true
   return true
 end
@@ -3732,6 +3775,7 @@ function Audio.pause()
   if not Audio.track then return end
   Audio.pos = Audio.position()
   Audio.paused = true
+  Audio.clearKickstart()
   Audio.stopSpeakers()
   Audio.closeStream()
   Audio.viz.active = false
@@ -3741,16 +3785,13 @@ function Audio.resume()
   if not Audio.track then return false end
   Audio.scan()
   if Audio.liveCount() == 0 then return false, "no speakers attached" end
+  Audio.clearKickstart()
   Audio.stopSpeakers()
-  Audio.yieldForStop()
   local ok, err = Audio.resetStream(Audio.pos)
   if not ok then return false, err end
   Audio.paused = false
-  ok, err = Audio.kickstart(12)
-  if not ok then
-    Audio.paused = true
-    return false, err or "could not start playback"
-  end
+  Audio.armKickstart(12, true)
+  os.queueEvent("speaker_audio_empty")
   Audio.viz.active = true
   return true
 end
@@ -3770,17 +3811,19 @@ function Audio.seek(sec)
   local wasPlaying = not Audio.paused
   Audio.pos = sec
   if wasPlaying then
+    Audio.clearKickstart()
+    Audio._pendingAdvance = false
     Audio.stopSpeakers()
-    Audio.yieldForStop()
     local ok = Audio.resetStream(sec)
     if ok then
       Audio.paused = false
-      Audio.kickstart(8)
+      Audio.armKickstart(8, true)
+      os.queueEvent("speaker_audio_empty")
     end
   else
     Audio.closeStream()
   end
-  Audio.viz.active = wasPlaying and Audio.started
+  Audio.viz.active = wasPlaying
 end
 
 function Audio.position()
@@ -3789,22 +3832,18 @@ function Audio.position()
 end
 
 function Audio.setVolume(v)
-  local prev = Audio.volume
   Audio.volume = Util.clamp(tonumber(v) or Audio.volume, 0, Audio.MAX_VOLUME)
   if App.cfg then App.cfg.volume = Audio.volume; Config.saveSoon() end
-  -- Instant volume: re-pump at the new level without reopening/seeking the stream.
-  if Audio.track and not Audio.paused and Audio.volume ~= prev then
-    Audio.relevel()
-  end
+  -- Smooth volume: do NOT stop/resync/relevel. playAudio volume is applied
+  -- per chunk in Audio.pump via playLevel(); already-queued PCM keeps its
+  -- old level for a fraction of a second, then new chunks use the new level.
 end
 
 function Audio.setMuted(m)
-  local prev = Audio.muted
   Audio.muted = m and true or false
   if App.cfg then App.cfg.muted = Audio.muted; Config.saveSoon() end
-  if Audio.track and not Audio.paused and Audio.muted ~= prev then
-    Audio.relevel()
-  end
+  -- Same as setVolume: mute flag is read by playLevel() on the next pump.
+  -- No stop/restart — avoids the audible stop-then-play glitch.
 end
 
 function Audio.toggleMute()
@@ -3963,65 +4002,128 @@ function Audio.pump(maxPushes)
   return pushes
 end
 
+-- Playhead has caught the decoded buffer (normal end path).
+function Audio.bufferDrained()
+  if Audio.paused or not Audio.track then return false end
+  if not Audio.eof or Audio.pending then return false end
+  local remaining = (Audio.queuedSamples / Audio.SR) - (Audio.pos - Audio.startPos)
+  return remaining <= 0.03
+end
+
+-- Mark track finished once. onEnd is deferred so callers can finish their
+-- event/tick work before Player.next → playTrack runs.
+function Audio.markEnded()
+  if Audio.ended or Audio.paused or not Audio.track then return false end
+  Audio.ended = true
+  Audio._pendingAdvance = true
+  -- Snap playhead to the real buffered end (may exceed declared dur).
+  local bufferedEnd = Audio.startPos + (Audio.queuedSamples / Audio.SR)
+  if Audio.pos < bufferedEnd then Audio.pos = bufferedEnd end
+  if Audio.track.dur and Audio.track.dur > 0 and Audio.pos > Audio.track.dur then
+    Audio.pos = Audio.track.dur
+  end
+  return true
+end
+
+function Audio.checkEnded()
+  if Audio.ended or Audio.paused or not Audio.track then return false end
+  if not Audio.bufferDrained() then return false end
+  return Audio.markEnded()
+end
+
+-- Run deferred queue advance (end-of-track → Player.next).
+function Audio.flushAdvance()
+  if not Audio._pendingAdvance then return end
+  Audio._pendingAdvance = false
+  if Audio.onEnd then pcall(Audio.onEnd) end
+end
+
+function Audio.handleKickFailure()
+  if not Audio._kickFail then return end
+  local err = Audio._kickFail
+  Audio._kickFail = nil
+  if Player then Player.paused = true end
+  if UI and UI.toast then
+    UI.toast("Cannot play: " .. tostring(err), "danger")
+  end
+  if UI and UI.request then UI.request(true) end
+end
+
+-- speaker_audio_empty is the reliable end signal when Audio.tick has stalled
+-- (legacy nested sleep ate the main timer): speakers drained, nothing left to
+-- decode → advance the queue even if the playhead never caught up.
+function Audio.onSpeakerEmpty()
+  local kick = Audio.kickstartStep()
+  if kick == "fail" then
+    Audio.handleKickFailure()
+    return
+  end
+  if kick == "pending" then return end
+  if Audio.paused or not Audio.track then return end
+  local pushed = Audio.pump(2)
+  if Audio.eof and not Audio.pending and pushed == 0 then
+    Audio.markEnded()
+  else
+    Audio.checkEnded()
+  end
+  Audio.flushAdvance()
+end
+
 function Audio.tick(dt)
   local now = Util.now()
   if not Audio.lastTick or Audio.lastTick == 0 then Audio.lastTick = now end
   dt = Util.clamp(now - Audio.lastTick, 0, 5)
   Audio.lastTick = now
+
+  -- Drive non-blocking kickstart before normal pump/position work.
+  local kick = Audio.kickstartStep()
+  if kick == "fail" then
+    Audio.handleKickFailure()
+  end
+
   if not Audio.track then
     Audio.smoothViz(dt)
     return
   end
   if not Audio.paused and Audio.started then
+    -- Advance playhead against buffered PCM, NOT clamped to declared dur.
+    -- Clamping to track.dur left remaining > 0 forever when metadata was
+    -- short/zero, so onEnd never fired and the queue sat idle after EOF.
     local available = (Audio.queuedSamples / Audio.SR) - (Audio.pos - Audio.startPos)
     if available > 0 then
       Audio.pos = Audio.pos + math.min(dt, available)
     end
-    if Audio.pos > Audio.track.dur then Audio.pos = Audio.track.dur end
   end
-  Audio.pump(1)
+  -- Skip an extra pump while a kickstart wait/retry owns the stream.
+  if not (Audio._kickTries and Audio._kickTries > 0) then
+    Audio.pump(1)
+  end
   Audio.smoothViz(dt)
-  if not Audio.paused and not Audio.ended and Audio.eof and not Audio.pending then
-    local remaining = (Audio.queuedSamples / Audio.SR) - (Audio.pos - Audio.startPos)
-    if remaining <= 0.03 then
-      Audio.ended = true
-      if Audio.onEnd then pcall(Audio.onEnd) end
-    end
-  end
+  Audio.checkEnded()
   if not Audio.paused and Audio.liveCount() == 0 then
     if Audio.onNoSpeakers then pcall(Audio.onNoSpeakers) end
   end
+  Audio.flushAdvance()
 end
 
--- Flush speaker buffers and re-pump at the current volume without reopening
--- the DFPWM file or seeking. Used for instant volume / mute changes.
+-- Volume/mute must NOT stop speakers. Kept as a no-op so older call sites
+-- that still invoke relevel() cannot reintroduce stop-then-play.
 function Audio.relevel()
-  if Audio.paused or not Audio.track or not Audio.fh then return end
-  local pos = Audio.position()
-  Audio.stopSpeakers()
-  Audio.yieldForStop()
-  if Audio.pending then
-    Audio.accepted = {}
-  end
-  -- Keep fh/decoder where they are. Re-anchor the playhead so tick accounting
-  -- matches the cleared speaker buffer (small skip of already-queued PCM).
-  Audio.startPos = pos
-  Audio.pos = pos
-  Audio.queuedSamples = 0
-  Audio.started = false
-  Audio.kickstart(8)
+  -- playLevel() is consulted on every playAudio; nothing else to do.
 end
 
 -- Full reopen + seek (speaker set changes, recovery). Not used for volume.
 function Audio.resync()
   if Audio.paused or not Audio.track then return end
   local pos = Audio.position()
+  Audio.clearKickstart()
+  Audio._pendingAdvance = false
   Audio.stopSpeakers()
-  Audio.yieldForStop()
   local ok = Audio.resetStream(pos)
   if ok then
     Audio.paused = false
-    Audio.kickstart(8)
+    Audio.armKickstart(8, true)
+    os.queueEvent("speaker_audio_empty")
   end
 end
 
@@ -4400,6 +4502,8 @@ function Player.next(auto)
   end
   local np = Player.qpos + 1
   if np > #Player.qorder then
+    -- Only stop at true end-of-queue when auto-advancing with repeat off.
+    -- Manual next wraps; repeat all/one keeps going.
     if auto and Player.repeatMode == "off" then
       Player.stop(true)
       UI.toast("End of queue", "info")
@@ -9919,7 +10023,8 @@ function App.handleEvent(ev, p1, p2, p3)
     UI.refreshDiskSpace(true)
     UI.request(true)
   elseif ev == "speaker_audio_empty" then
-    Audio.pump(2)
+    -- Feed speakers and detect end-of-track even when Audio.tick is stalled.
+    Audio.onSpeakerEmpty()
   elseif ev == "terminate" then
     App.quit = true
   end
@@ -9966,9 +10071,13 @@ function App.main()
   while not App.quit do
     local ev, p1, p2, p3 = os.pullEventRaw()
     if ev == "timer" and p1 == tick then
-      tick = os.startTimer(0.05)
+      -- Schedule the next tick AFTER App.tick returns. Arming it first meant
+      -- any nested sleep/pullEvent inside tick (legacy kickstart) could eat
+      -- that timer id and permanently stall the loop — songs would finish
+      -- without auto-advance.
       local ok, err = pcall(App.tick)
       if not ok then Store.logError("tick", err) end
+      tick = os.startTimer(0.05)
     else
       local ok, err = pcall(App.handleEvent, ev, p1, p2, p3)
       if not ok then
