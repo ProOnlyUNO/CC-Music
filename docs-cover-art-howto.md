@@ -4,7 +4,7 @@
 
 Source PNG: Project `media/sing-me-a-lullaby-cover.png`
 
-Converted with desktop `nfp_core` → 48×48 `cover.nfp` (default), placed at:
+Converted with desktop `nfp_core` → 128×128 `cover.nfp` (default), placed at:
 
 - `C:\Users\Smoke\Desktop\CC\Music CC\$UICIDEBOY$\Sing Me a Lullaby, My Sweet Temptation\cover.nfp`
 - `C:\Users\Smoke\Documents\CC-Music-Tools\dfpwm_out\$uicideboy$\Sing Me a Lullaby, My Sweet Temptation\cover.nfp`

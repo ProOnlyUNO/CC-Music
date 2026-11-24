@@ -38,9 +38,9 @@ CC_PALETTE: list[tuple[int, int, int]] = [
 NFP_CHARS = "0123456789abcdef"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 # Default cover resolution for jukebox thumbs. Aurora UI resamples into
-# slot sizes (Art.buildCells), so 48×48 fits list + now-playing without
-# 1:1 overflow. 32×32 is fine too; 48 keeps more detail on large art.
-DEFAULT_NFP_SIZE = 48
+# slot sizes (Art.buildCells), so native .nfp size is not 1:1 on screen.
+# Keep in sync with jukebox.lua decodeNfp NFP_MAX (raise both together for 256).
+DEFAULT_NFP_SIZE = 128
 COVER_NAMES = {
     "cover",
     "folder",
