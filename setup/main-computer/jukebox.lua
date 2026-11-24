@@ -3564,12 +3564,28 @@ function Audio.stopSpeakers()
   end
 end
 
+-- speaker.stop() only sets a flag; the server clears dfpwmState on the next
+-- tick. playAudio before that either sees a full buffer (returns false) or
+-- queues audio that the pending stop then wipes. Yield one tick after stop.
+function Audio.yieldForStop()
+  sleep(0)
+end
+
 function Audio.effectiveVolume()
   return Audio.muted and 0 or Util.clamp(Audio.volume, 0, Audio.MAX_VOLUME)
 end
 
+-- CC:Tweaked playAudio volume is always 0..3 (hear distance + loudness).
+function Audio.playLevel(sp)
+  local vol = Audio.effectiveVolume()
+  local gain = Util.clamp(tonumber(sp and sp.gain) or 1, 0, 1)
+  return Util.clamp(vol * gain, 0, 3)
+end
+
 function Audio.volumeFrac()
-  return Util.clamp(Audio.volume / Audio.MAX_VOLUME, 0, 1)
+  local maxV = Audio.MAX_VOLUME
+  if not maxV or maxV <= 0 then maxV = 3 end
+  return Util.clamp(Audio.volume / maxV, 0, 1)
 end
 
 function Audio.volumeLabel()
@@ -3612,20 +3628,47 @@ function Audio.loadTrack(track, sec)
   return Audio.resetStream(Audio.pos)
 end
 
+-- Pump + brief yields until the first PCM chunk is accepted (or we give up).
+function Audio.kickstart(maxTries)
+  maxTries = maxTries or 12
+  local lastErr = "could not start playback"
+  for try = 1, maxTries do
+    if Audio.liveCount() == 0 then
+      return false, "no speakers attached"
+    end
+    Audio.pump(1)
+    if Audio.started then
+      return true
+    end
+    if Audio.eof and not Audio.pending then
+      if Audio.reason and Audio.reason ~= "" and Audio.reason ~= "cc.audio.dfpwm ready" then
+        return false, Audio.reason
+      end
+      return false, "empty or invalid audio"
+    end
+    lastErr = "could not start playback"
+    -- Wait for stop to apply / buffer to drain, then retry (pre-Aurora pushAudio).
+    sleep(0)
+  end
+  return false, lastErr
+end
+
 function Audio.playTrack(track, from, silent)
   if not track then return false, "no track" end
   if not Audio.loaded then return false, Audio.reason end
+  Audio.scan()
   if Audio.liveCount() == 0 then return false, "no speakers attached" end
   Audio.track = track
   Audio.paused = true
   Audio.stopSpeakers()
+  Audio.yieldForStop()
   local ok, err = Audio.resetStream(from or 0)
   if not ok then return false, err end
   Audio.paused = false
-  Audio.pump(3)
-  if not Audio.started then
+  ok, err = Audio.kickstart(12)
+  if not ok then
     Audio.paused = true
-    return false, "could not start playback"
+    return false, err or "could not start playback"
   end
   Audio.viz.active = true
   return true
@@ -3642,15 +3685,17 @@ end
 
 function Audio.resume()
   if not Audio.track then return false end
+  Audio.scan()
   if Audio.liveCount() == 0 then return false, "no speakers attached" end
   Audio.stopSpeakers()
+  Audio.yieldForStop()
   local ok, err = Audio.resetStream(Audio.pos)
   if not ok then return false, err end
   Audio.paused = false
-  Audio.pump(3)
-  if not Audio.started then
+  ok, err = Audio.kickstart(12)
+  if not ok then
     Audio.paused = true
-    return false, "could not start playback"
+    return false, err or "could not start playback"
   end
   Audio.viz.active = true
   return true
@@ -3672,15 +3717,16 @@ function Audio.seek(sec)
   Audio.pos = sec
   if wasPlaying then
     Audio.stopSpeakers()
+    Audio.yieldForStop()
     local ok = Audio.resetStream(sec)
     if ok then
       Audio.paused = false
-      Audio.pump(3)
+      Audio.kickstart(8)
     end
   else
     Audio.closeStream()
   end
-  Audio.viz.active = wasPlaying
+  Audio.viz.active = wasPlaying and Audio.started
 end
 
 function Audio.position()
@@ -3819,23 +3865,32 @@ function Audio.pump(maxPushes)
       Audio.analyze(decoded)
     end
     local all = true
-    local vol = Audio.effectiveVolume()
+    local acceptedAny = false
     for _, sp in ipairs(Audio.speakers) do
-      if not sp.dead and sp.enabled and not Audio.accepted[sp.name] then
-        -- Broadcast same PCM chunk to every enabled speaker (wired + adjacent).
-        local level = Util.clamp(vol * (sp.gain or 1), 0, Audio.MAX_VOLUME)
-        local ok, accepted = pcall(sp.dev.playAudio, Audio.pending, level)
-        if not ok then
-          sp.dead = true
-          if UI and UI.toast then UI.toast("Speaker disconnected: " .. sp.name, "danger") end
-        elseif accepted then
-          Audio.accepted[sp.name] = true
+      if not sp.dead and sp.enabled then
+        if Audio.accepted[sp.name] then
+          acceptedAny = true
         else
-          all = false
+          -- Broadcast same PCM chunk to every enabled speaker (wired + adjacent).
+          -- playAudio volume must be a finite 0..3 (CC API), independent of UI max.
+          local level = Audio.playLevel(sp)
+          local ok, accepted = pcall(sp.dev.playAudio, Audio.pending, level)
+          if not ok then
+            sp.dead = true
+            all = false
+            if UI and UI.toast then UI.toast("Speaker disconnected: " .. sp.name, "danger") end
+          elseif accepted then
+            Audio.accepted[sp.name] = true
+            acceptedAny = true
+          else
+            all = false
+          end
         end
       end
     end
-    if all then
+    -- Finish the chunk only when every live speaker has accepted (or died).
+    -- Require at least one acceptance so a total failure cannot mark started.
+    if all and acceptedAny then
       Audio.queuedSamples = Audio.queuedSamples + #Audio.pending
       Audio.pending = nil
       Audio.accepted = {}
@@ -3886,10 +3941,11 @@ function Audio.resync()
   if Audio.paused or not Audio.track then return end
   local pos = Audio.position()
   Audio.stopSpeakers()
+  Audio.yieldForStop()
   local ok = Audio.resetStream(pos)
   if ok then
     Audio.paused = false
-    Audio.pump(2)
+    Audio.kickstart(8)
   end
 end
 
