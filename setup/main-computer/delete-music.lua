@@ -43,12 +43,6 @@ for _, a in ipairs(rawArgs) do
   end
 end
 
-local ROOTS = { "music", "disk", "disk/music" }
-for i = 1, 50 do
-  ROOTS[#ROOTS + 1] = "disk" .. i
-  ROOTS[#ROOTS + 1] = "disk" .. i .. "/music"
-end
-
 local PROTECTED_TOP = {
   sfx = true,
   rom = true,
@@ -58,6 +52,64 @@ local PROTECTED_TOP = {
 ------------------------------------------------------------------ helpers
 local function modeTag()
   return opts.dryRun and "[dry-run] " or ""
+end
+
+-- All floppy mounts: fs root disk/diskN (any N) + drive peripherals.
+local function listFloppyMounts()
+  local mounts, seen = {}, {}
+  local function add(m)
+    if not m or m == "" then return end
+    m = tostring(m):gsub("^/", "")
+    if seen[m] or not m:match("^disk%d*$") then return end
+    local ok, isDir = pcall(fs.isDir, m)
+    if ok and isDir then
+      seen[m] = true
+      mounts[#mounts + 1] = m
+    end
+  end
+  local lok, entries = pcall(fs.list, "")
+  if lok and type(entries) == "table" then
+    for _, name in ipairs(entries) do
+      if type(name) == "string" and name:match("^disk%d*$") then add(name) end
+    end
+  end
+  local pok, names = pcall(peripheral.getNames)
+  if pok and type(names) == "table" then
+    for _, pname in ipairs(names) do
+      local tok, typ = pcall(peripheral.getType, pname)
+      if tok and typ == "drive" then
+        local mok, mount = pcall(disk.getMountPath, pname)
+        if mok and mount then add(mount) end
+      end
+    end
+  end
+  table.sort(mounts, function(a, b)
+    local na = tonumber(a:match("%d+")) or (a == "disk" and 1 or 0)
+    local nb = tonumber(b:match("%d+")) or (b == "disk" and 1 or 0)
+    if na ~= nb then return na < nb end
+    return a < b
+  end)
+  return mounts
+end
+
+local ROOTS = { "music", "disk", "disk/music" }
+do
+  local seen = { music = true, disk = true, ["disk/music"] = true }
+  for _, m in ipairs(listFloppyMounts()) do
+    if not seen[m] then
+      seen[m] = true
+      ROOTS[#ROOTS + 1] = m
+    end
+    local mr = m .. "/music"
+    if not seen[mr] and fs.exists(mr) and fs.isDir(mr) then
+      seen[mr] = true
+      ROOTS[#ROOTS + 1] = mr
+    elseif not seen[mr] then
+      -- Keep candidate even if empty; scan skips missing dirs.
+      seen[mr] = true
+      ROOTS[#ROOTS + 1] = mr
+    end
+  end
 end
 
 local function isAudio(name)
@@ -258,13 +310,10 @@ local function lrcCandidates(track)
     fs.combine("lyrics", artist, album, base .. ".lrc"),
     fs.combine("lyrics", artist, album, title .. ".lrc"),
   }
-  local lyricMounts = { "disk", "disk1" }
-  for i = 2, 50 do lyricMounts[#lyricMounts + 1] = "disk" .. i end
+  local lyricMounts = listFloppyMounts()
   for _, m in ipairs(lyricMounts) do
-    if fs.exists(m) then
-      list[#list + 1] = fs.combine(m, "lyrics", artist, album, base .. ".lrc")
-      list[#list + 1] = fs.combine(m, "lyrics", artist, album, title .. ".lrc")
-    end
+    list[#list + 1] = fs.combine(m, "lyrics", artist, album, base .. ".lrc")
+    list[#list + 1] = fs.combine(m, "lyrics", artist, album, title .. ".lrc")
   end
   for _, root in ipairs(ROOTS) do
     if path:sub(1, #root) == root and (path:sub(#root + 1, #root + 1) == "/" or path == root) then
@@ -273,9 +322,7 @@ local function lrcCandidates(track)
         local relLrc = rel:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", ".lrc")
         list[#list + 1] = fs.combine("lyrics", relLrc)
         for _, m in ipairs(lyricMounts) do
-          if fs.exists(m) then
-            list[#list + 1] = fs.combine(m, "lyrics", relLrc)
-          end
+          list[#list + 1] = fs.combine(m, "lyrics", relLrc)
         end
       end
     end
@@ -285,7 +332,7 @@ end
 
 ------------------------------------------------------------------ delete helpers
 local MOUNT_NAMES = { music = true, disk = true, disk1 = true, lyrics = true }
-for i = 2, 50 do MOUNT_NAMES["disk" .. i] = true end
+for _, m in ipairs(listFloppyMounts()) do MOUNT_NAMES[m] = true end
 
 local function canDeleteFile(path)
   if isProtectedPath(path) then return false, "protected (sfx/rom)" end
@@ -384,12 +431,8 @@ local function deleteTracks(tracks, alsoPruneAlbumDirs)
       local artist, album = track.artist or "", track.album or ""
       if artist ~= "" and album ~= "" then
         dirsToPrune[fs.combine("lyrics", artist, album)] = true
-        local lyricMounts = { "disk", "disk1" }
-        for i = 2, 50 do lyricMounts[#lyricMounts + 1] = "disk" .. i end
-        for _, m in ipairs(lyricMounts) do
-          if fs.exists(m) then
-            dirsToPrune[fs.combine(m, "lyrics", artist, album)] = true
-          end
+        for _, m in ipairs(listFloppyMounts()) do
+          dirsToPrune[fs.combine(m, "lyrics", artist, album)] = true
         end
       end
     end

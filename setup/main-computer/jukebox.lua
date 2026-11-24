@@ -522,14 +522,15 @@ Config.defaultRoots = {
   "disk/music",
 }
 
+-- Cap for cfg.roots. Old value (40) truncated boot-expanded disk1..N pairs
+-- so libraries stopped around disk19. High enough for dense drive banks.
+Config.MAX_ROOTS = 256
+
 -- Roots that older AURORA/jukebox versions added automatically.  Missing
 -- entries from this list are pruned once so the settings page stays useful.
+-- (Any diskN / diskN/music path is also treated as legacy via isLegacyRoot.)
 Config.legacyRoots = {
-  "music", "disk/music",
-  "disk1/music", "disk2/music", "disk3/music", "disk4/music",
-  "disk5/music", "disk6/music", "disk7/music", "disk8/music",
-  "disk9/music", "disk10/music", "disk11/music", "disk12/music",
-  "disk13/music", "disk14/music", "disk15/music", "disk16/music",
+  "music", "disk", "disk/music",
 }
 
 Config.accents = {
@@ -661,7 +662,7 @@ local function validate(c)
   c.showLyricsPreview = c.showLyricsPreview ~= false
   c.recentApps = validStringList(c.recentApps, 8)
   c.recentFiles = validStringList(c.recentFiles, 10)
-  c.roots = validStringList(c.roots, 40)
+  c.roots = validStringList(c.roots, Config.MAX_ROOTS)
   if #c.roots == 0 then
     for i, p in ipairs(Config.defaultRoots) do c.roots[i] = p end
   end
@@ -685,23 +686,70 @@ local function readOld(name)
 end
 
 local function isLegacyRoot(path)
+  path = tostring(path or "")
+  if path:match("^disk%d*$") or path:match("^disk%d*/music$") then return true end
   for _, p in ipairs(Config.legacyRoots) do if p == path then return true end end
   return false
+end
+
+-- All attached floppy mounts: fs root dirs named disk/diskN (any N) plus
+-- drive peripherals via disk.getMountPath (side/network drive names).
+function Config.listFloppyMounts()
+  local mounts, seen = {}, {}
+  local function add(m)
+    if not m or m == "" then return end
+    m = tostring(m):gsub("^/", "")
+    if seen[m] or not m:match("^disk%d*$") then return end
+    local ok, isDir = pcall(fs.isDir, m)
+    if ok and isDir then
+      seen[m] = true
+      mounts[#mounts + 1] = m
+    end
+  end
+  local lok, entries = pcall(fs.list, "")
+  if lok and type(entries) == "table" then
+    for _, name in ipairs(entries) do
+      if type(name) == "string" and name:match("^disk%d*$") then add(name) end
+    end
+  end
+  local pok, names = pcall(peripheral.getNames)
+  if pok and type(names) == "table" then
+    for _, pname in ipairs(names) do
+      local tok, typ = pcall(peripheral.getType, pname)
+      if tok and typ == "drive" then
+        local mok, mount = pcall(disk.getMountPath, pname)
+        if mok and mount then add(mount) end
+      end
+    end
+  end
+  table.sort(mounts, function(a, b)
+    local na = tonumber(a:match("%d+")) or (a == "disk" and 1 or 0)
+    local nb = tonumber(b:match("%d+")) or (b == "disk" and 1 or 0)
+    if na ~= nb then return na < nb end
+    return a < b
+  end)
+  return mounts
 end
 
 function Config.discoverRoots()
   if not App.cfg then return end
   local present = {}
   for _, p in ipairs(App.cfg.roots) do present[p] = true end
-  local candidates = { "disk/music" }
-  for i = 1, 16 do candidates[#candidates + 1] = "disk" .. i .. "/music" end
   local added = false
-  for _, p in ipairs(candidates) do
-    if #App.cfg.roots < 12 and not present[p] and fs.isDir(p) then
-      App.cfg.roots[#App.cfg.roots + 1] = p
-      present[p] = true
+  local function consider(path)
+    if not path or present[path] then return end
+    if #App.cfg.roots >= (Config.MAX_ROOTS or 256) then return end
+    local ok, isDir = pcall(fs.isDir, path)
+    if ok and isDir then
+      App.cfg.roots[#App.cfg.roots + 1] = path
+      present[path] = true
       added = true
     end
+  end
+  consider("music")
+  for _, mount in ipairs(Config.listFloppyMounts()) do
+    consider(mount)
+    consider(fs.combine(mount, "music"))
   end
   if added then Config.saveSoon() end
 end
@@ -757,7 +805,7 @@ function Config.saveSoon()
 end
 
 function Config.setRoots(roots)
-  App.cfg.roots = validStringList(roots, 40)
+  App.cfg.roots = validStringList(roots, Config.MAX_ROOTS)
   if #App.cfg.roots == 0 then
     App.cfg.roots[1] = "music"
   end
@@ -773,7 +821,7 @@ function Config.addRoot(path)
   for _, p in ipairs(App.cfg.roots) do
     if p == path then return false end
   end
-  if #App.cfg.roots >= 40 then return false end
+  if #App.cfg.roots >= (Config.MAX_ROOTS or 256) then return false end
   App.cfg.roots[#App.cfg.roots + 1] = path
   Config.saveSoon()
   return true
@@ -4969,6 +5017,12 @@ function UI.refreshDiskSpace(force)
     nDrives = nDrives + 1
   end
 
+  -- Prefer live mount scan (any diskN + drive peripherals); roots as fallback.
+  if Config.listFloppyMounts then
+    for _, mount in ipairs(Config.listFloppyMounts()) do
+      consider(mount)
+    end
+  end
   local roots = (App.cfg and App.cfg.roots) or Config.defaultRoots or {}
   for _, root in ipairs(roots) do
     local mount = tostring(root):match("^(disk%d*)")
@@ -9849,9 +9903,13 @@ function App.handleEvent(ev, p1, p2, p3)
     local ok, t = pcall(peripheral.getType, p1)
     if ok then typ = t end
     if typ == "monitor" or p1 == App.monName then App.reinitDisplay() end
-    if typ == "drive" then UI.refreshDiskSpace(true) end
+    if typ == "drive" then
+      Config.discoverRoots()
+      UI.refreshDiskSpace(true)
+    end
     UI.toast("Peripherals changed · " .. Audio.liveCount() .. " speakers", "info")
   elseif ev == "disk" or ev == "disk_eject" then
+    Config.discoverRoots()
     UI.refreshDiskSpace(true)
     UI.request(true)
   elseif ev == "speaker_audio_empty" then
@@ -9939,15 +9997,11 @@ local function openWirelessModems()
   end)
 end
 
--- Expand default roots to match ProOnlyUNO disk library layout.
+-- Lean defaults; Config.discoverRoots() / listFloppyMounts() attach every
+-- present disk/diskN (any N) and drive-peripheral mounts at boot and on insert.
 do
-  local roots = { "music", "disk", "disk/music" }
-  for i = 1, 50 do
-    roots[#roots + 1] = "disk" .. i
-    roots[#roots + 1] = "disk" .. i .. "/music"
-  end
-  Config.defaultRoots = roots
-  Config.legacyRoots = roots
+  Config.defaultRoots = { "music", "disk", "disk/music" }
+  Config.legacyRoots = { "music", "disk", "disk/music" }
 end
 
 -- Always sync-scroll lyrics (no FOLLOW toggle).
