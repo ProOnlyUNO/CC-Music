@@ -9,15 +9,16 @@ Same stem beside the song (Importer-friendly):
 ```text
 music/$uicideboy$/Sing Me a Lullaby, My Sweet Temptation/
   Escape from BABYLON.dfpwm
-  Escape from BABYLON.cvid
-  Escape from BABYLON.lrc   (optional)
+  Escape from BABYLON.cvid          (single ≤ ~20 MiB)
+  Escape from BABYLON.cvid.1/.2     (multipart high-res)
+  Escape from BABYLON.lrc           (optional)
 ```
 
-`.cvid` is a **CVID1** frame pack (sextant blit cells). Audio stays on `.dfpwm`.
+`.cvid` is a **CVID1** frame pack (sextant blit cells). Audio stays on `.dfpwm`. Multipart parts are each a full CVID1 slice; the player keeps one part in RAM and loads the next at the boundary.
 
 ## Encode (Windows)
 
-Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **160×45 cells @ 8 fps** (largest 32:9 encode under the ~20 MiB CC disk limit for ~3 min tracks; jukebox fill-blits to the monitor).
+Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **256×72 cells @ 8 fps**. Packs over the ~20 MiB CC disk limit auto-split into `Song.cvid.1` / `.2` / `.3` (jukebox seamless-loads the next part). Single-file fallback: `--cells 160x45` (fits ~3 min under 20 MiB).
 
 ### CC Music Tools (Convert tab)
 
@@ -30,6 +31,8 @@ Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **160×45 
 
 ```text
 cd desktop
+python ../tools/cvid_convert.py path\to\clip.mp4 -o "path\to\Artist\Album" --fps 8 --cells 256x72
+# single-file fallback:
 python ../tools/cvid_convert.py path\to\clip.mp4 -o "path\to\Artist\Album" --fps 8 --cells 160x45
 ```
 
@@ -55,5 +58,5 @@ Encoded from the uploaded lyric video into the desktop library:
 ```text
 C:\Users\Smoke\Desktop\CC\Music CC\$UICIDEBOY$\Sing Me a Lullaby, My Sweet Temptation\
   Escape from BABYLON.dfpwm
-  Escape from BABYLON.cvid   (160×45 @ 8 fps, ~1129 frames, ~15.5 MiB)
+  Escape from BABYLON.cvid.1 / .cvid.2   (256×72 @ 8 fps, ~1129 frames, ≤20 MiB each)
 ```

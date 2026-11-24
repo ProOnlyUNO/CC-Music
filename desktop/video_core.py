@@ -3,7 +3,8 @@
 
 Pack layout (Importer-friendly, beside the song):
     Artist/Album/Song.dfpwm
-    Artist/Album/Song.cvid
+    Artist/Album/Song.cvid              (single file when ≤ ~20 MiB)
+    Artist/Album/Song.cvid.1/.2/.3      (multipart when high-res exceeds disk)
 
 CVID1 matches jukebox.lua Video (Aurora):
     magic "CVID1", u8 ver=1, u16 w, u16 h (cells),
@@ -18,6 +19,7 @@ the music-video handoff can keep sound continuous.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -35,15 +37,18 @@ ProgressFn = Callable[[str, float | None, str], None]
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpeg", ".mpg"}
 
 # Target wall: 9×3 advanced monitors @ scale 0.5 (~270×60 cells; INSTALL.md).
-# Default encode: 160×45 @ 8 fps — largest 32:9 size that stays under the ~20 MiB
-# CC disk limit for ~3 min tracks (≈19.8 MiB raw). Escape (~141s) ≈15.5 MiB.
-# Fill-blit scales to the wall; jukebox load cap remains 48 MiB / w≤320 / h≤120.
-DEFAULT_CELLS_W = 160
-DEFAULT_CELLS_H = 45
+# Default encode: 256×72 @ 8 fps — near-wall. Packs that exceed the ~20 MiB CC
+# disk limit are auto-split into Song.cvid.1/.2/.3 (each a full CVID1 slice).
+# Single-file fallback: 160×45 stays under ~20 MiB for ~3 min tracks.
+DEFAULT_CELLS_W = 256
+DEFAULT_CELLS_H = 72
+SINGLE_FILE_CELLS_W = 160
+SINGLE_FILE_CELLS_H = 45
 DEFAULT_FPS = 8
 DEFAULT_MAX_SECONDS = 0  # 0 = full clip
-# Documented wall size (for CLI/UI hints). Longer tracks need fewer cells to
-# stay under the ~20 MiB disk budget; ~3 min fits 160×45.
+# Per-file disk budget (CC computer/disk ~20 MiB). 0 disables multipart split.
+MAX_PART_BYTES = 20 * 1024 * 1024
+# Documented wall size (for CLI/UI hints).
 TARGET_MONITOR_CELLS_W = 270
 TARGET_MONITOR_CELLS_H = 60
 
@@ -157,16 +162,29 @@ def _encode_frame_bytes(
     return bytes(out)
 
 
-def _build_cvid(
-    frame_paths: list[Path],
+def max_frames_per_part(
+    cells_w: int,
+    cells_h: int,
+    max_part_bytes: int = MAX_PART_BYTES,
+) -> int:
+    """How many frames fit in one CVID1 file under max_part_bytes."""
+    if max_part_bytes <= 0:
+        return 10**9
+    cell_bytes = cells_w * cells_h * 2
+    per = cell_bytes + 2  # frame pixels + duration u16
+    if per <= 0:
+        return 1
+    return max(1, (max_part_bytes - 64) // per)
+
+
+def _assemble_cvid(
+    frame_blobs: list[bytes],
     cells_w: int,
     cells_h: int,
     duration_ms: int,
     palette: list[tuple[int, int, int]],
 ) -> bytes:
-    from PIL import Image
-
-    n = len(frame_paths)
+    n = len(frame_blobs)
     header = bytearray(64)
     header[0:5] = b"CVID1"
     header[5] = 1
@@ -179,18 +197,79 @@ def _build_cvid(
         header[o] = r & 255
         header[o + 1] = g & 255
         header[o + 2] = b & 255
+    dur = struct.pack("<" + ("H" * n), *([duration_ms] * n))
+    return b"".join([bytes(header), *frame_blobs, dur])
 
-    parts = [bytes(header)]
+
+def _build_cvid(
+    frame_paths: list[Path],
+    cells_w: int,
+    cells_h: int,
+    duration_ms: int,
+    palette: list[tuple[int, int, int]],
+) -> bytes:
+    from PIL import Image
+
     target = (cells_w * 2, cells_h * 3)
+    blobs: list[bytes] = []
     for fp in frame_paths:
         img = Image.open(fp).convert("RGB")
         if img.size != target:
             img = img.resize(target, Image.Resampling.BOX)
-        parts.append(_encode_frame_bytes(img, cells_w, cells_h, palette))
-    # Duration table: little-endian u16 per frame
-    dur = struct.pack("<" + ("H" * n), *([duration_ms] * n))
-    parts.append(dur)
-    return b"".join(parts)
+        blobs.append(_encode_frame_bytes(img, cells_w, cells_h, palette))
+    return _assemble_cvid(blobs, cells_w, cells_h, duration_ms, palette)
+
+
+def _encode_frame_blobs(
+    frame_paths: list[Path],
+    cells_w: int,
+    cells_h: int,
+    palette: list[tuple[int, int, int]],
+) -> list[bytes]:
+    from PIL import Image
+
+    target = (cells_w * 2, cells_h * 3)
+    blobs: list[bytes] = []
+    for fp in frame_paths:
+        img = Image.open(fp).convert("RGB")
+        if img.size != target:
+            img = img.resize(target, Image.Resampling.BOX)
+        blobs.append(_encode_frame_bytes(img, cells_w, cells_h, palette))
+    return blobs
+
+
+def _list_cvid_parts(out_dir: Path, name: str) -> list[Path]:
+    """Existing Song.cvid.N siblings (sorted by part index)."""
+    found: list[tuple[int, Path]] = []
+    for p in out_dir.glob(f"{name}.cvid.*"):
+        m = re.fullmatch(re.escape(name) + r"\.cvid\.(\d+)", p.name, re.IGNORECASE)
+        if m and p.is_file():
+            found.append((int(m.group(1)), p))
+    found.sort(key=lambda t: t[0])
+    return [p for _, p in found]
+
+
+def _cleanup_cvid_outputs(out_dir: Path, name: str, *, keep_single: bool, keep_parts: int) -> None:
+    single = out_dir / f"{name}.cvid"
+    if not keep_single and single.exists():
+        try:
+            single.unlink()
+        except OSError:
+            pass
+    for p in _list_cvid_parts(out_dir, name):
+        m = re.search(r"\.cvid\.(\d+)$", p.name, re.IGNORECASE)
+        idx = int(m.group(1)) if m else 0
+        if idx < 1 or idx > keep_parts:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _write_atomic(path: Path, blob: bytes) -> None:
+    tmp_out = path.with_suffix(path.suffix + ".part")
+    tmp_out.write_bytes(blob)
+    os.replace(tmp_out, path)
 
 
 def convert_video_one(
@@ -203,15 +282,16 @@ def convert_video_one(
     cells_h: int = DEFAULT_CELLS_H,
     fps: float = DEFAULT_FPS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
+    max_part_bytes: int = MAX_PART_BYTES,
     overwrite: bool = False,
     skip_audio: bool = False,
     log: LogFn | None = None,
 ) -> dict:
-    """Convert one video → Song.dfpwm + Song.cvid under out_dir.
+    """Convert one video → Song.dfpwm + Song.cvid (or .cvid.1/.2/…) under out_dir.
 
-    Returns dict with keys: ok, dfpwm, cvid, frames, note.
+    Returns dict with keys: ok, dfpwm, cvid, parts, frames, note.
     """
-    from PIL import Image
+    from PIL import Image  # noqa: F401 — ensure Pillow present before ffmpeg work
 
     src = Path(src)
     out_dir = Path(out_dir)
@@ -221,9 +301,17 @@ def convert_video_one(
     name = "".join(ch if ch not in '\\/:*?"<>|' else "-" for ch in name).strip(" .") or "video"
     dfpwm = out_dir / f"{name}.dfpwm"
     cvid = out_dir / f"{name}.cvid"
+    cvid1 = out_dir / f"{name}.cvid.1"
 
-    if cvid.exists() and not overwrite:
-        return {"ok": False, "dfpwm": dfpwm, "cvid": cvid, "frames": 0, "note": "exists"}
+    if (cvid.exists() or cvid1.exists()) and not overwrite:
+        return {
+            "ok": False,
+            "dfpwm": dfpwm,
+            "cvid": cvid if cvid.exists() else cvid1,
+            "parts": [],
+            "frames": 0,
+            "note": "exists",
+        }
 
     ffprobe = shutil.which("ffprobe") or exe.replace("ffmpeg", "ffprobe")
     duration = _probe_duration(ffprobe, src) if ffprobe else 0.0
@@ -241,6 +329,7 @@ def convert_video_one(
                     "ok": False,
                     "dfpwm": dfpwm,
                     "cvid": cvid,
+                    "parts": [],
                     "frames": 0,
                     "note": f"audio: {info}",
                 }
@@ -268,7 +357,7 @@ def convert_video_one(
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             err = (r.stderr.strip().splitlines() or ["ffmpeg frame extract failed"])[-1]
-            return {"ok": False, "dfpwm": dfpwm, "cvid": cvid, "frames": 0, "note": err}
+            return {"ok": False, "dfpwm": dfpwm, "cvid": cvid, "parts": [], "frames": 0, "note": err}
 
         frames = sorted(tmp_path.glob("f_*.png"))
         if not frames:
@@ -276,28 +365,67 @@ def convert_video_one(
                 "ok": False,
                 "dfpwm": dfpwm,
                 "cvid": cvid,
+                "parts": [],
                 "frames": 0,
                 "note": "no frames extracted",
             }
 
         # Fixed official CC palette — remaps cleanly via Video.rgbSlot on Theme.
         palette = list(CC_PALETTE)
-        blob = _build_cvid(frames, cells_w, cells_h, duration_ms, palette)
-        tmp_out = cvid.with_suffix(cvid.suffix + ".part")
-        tmp_out.write_bytes(blob)
-        os.replace(tmp_out, cvid)
+        blobs = _encode_frame_blobs(frames, cells_w, cells_h, palette)
+        per_part = max_frames_per_part(cells_w, cells_h, max_part_bytes)
+        total_bytes = 64 + sum(len(b) for b in blobs) + 2 * len(blobs)
+
+        if len(blobs) <= per_part:
+            blob = _assemble_cvid(blobs, cells_w, cells_h, duration_ms, palette)
+            _write_atomic(cvid, blob)
+            _cleanup_cvid_outputs(out_dir, name, keep_single=True, keep_parts=0)
+            _log(
+                log,
+                f"  cvid {cvid.name}  {cells_w}x{cells_h} cells @ {fps:g} fps  "
+                f"({len(blobs)} frames, {len(blob) / 1048576:.2f} MB)",
+            )
+            return {
+                "ok": True,
+                "dfpwm": dfpwm,
+                "cvid": cvid,
+                "parts": [cvid],
+                "frames": len(blobs),
+                "bytes": len(blob),
+                "note": "",
+            }
+
+        # Multipart: Song.cvid.1 … Song.cvid.N (each ≤ max_part_bytes).
+        part_paths: list[Path] = []
+        part_bytes = 0
+        n_parts = (len(blobs) + per_part - 1) // per_part
+        for i in range(n_parts):
+            chunk = blobs[i * per_part : (i + 1) * per_part]
+            blob = _assemble_cvid(chunk, cells_w, cells_h, duration_ms, palette)
+            part = out_dir / f"{name}.cvid.{i + 1}"
+            _write_atomic(part, blob)
+            part_paths.append(part)
+            part_bytes += len(blob)
+            _log(
+                log,
+                f"  cvid {part.name}  {cells_w}x{cells_h} cells @ {fps:g} fps  "
+                f"({len(chunk)} frames, {len(blob) / 1048576:.2f} MB)  "
+                f"[part {i + 1}/{n_parts}]",
+            )
+        _cleanup_cvid_outputs(out_dir, name, keep_single=False, keep_parts=n_parts)
         _log(
             log,
-            f"  cvid {cvid.name}  {cells_w}x{cells_h} cells @ {fps:g} fps  "
-            f"({len(frames)} frames, {len(blob) / 1048576:.2f} MB)",
+            f"  multipart {n_parts}× ≤{max_part_bytes / 1048576:.0f} MB  "
+            f"({len(blobs)} frames, {total_bytes / 1048576:.2f} MB total)",
         )
         return {
             "ok": True,
             "dfpwm": dfpwm,
-            "cvid": cvid,
-            "frames": len(frames),
-            "bytes": len(blob),
-            "note": "",
+            "cvid": part_paths[0],
+            "parts": part_paths,
+            "frames": len(blobs),
+            "bytes": part_bytes,
+            "note": f"multipart:{n_parts}",
         }
 
 
@@ -309,6 +437,7 @@ def run_video_convert(
     cells_h: int = DEFAULT_CELLS_H,
     fps: float = DEFAULT_FPS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
+    max_part_bytes: int = MAX_PART_BYTES,
     overwrite: bool = False,
     skip_audio: bool = False,
     dry_run: bool = False,
@@ -333,6 +462,13 @@ def run_video_convert(
         f"Defaults: {cells_w}×{cells_h} cells @ {fps:g} fps "
         f"(sextant {cells_w * 2}×{cells_h * 3} px)",
     )
+    if max_part_bytes > 0:
+        _log(
+            log,
+            f"Part budget: ≤{max_part_bytes / 1048576:.0f} MB/file "
+            f"(~{max_frames_per_part(cells_w, cells_h, max_part_bytes)} frames/part); "
+            f"single-file fallback {SINGLE_FILE_CELLS_W}×{SINGLE_FILE_CELLS_H}",
+        )
     for f in files:
         _log(log, f"  {f.name}")
 
@@ -358,6 +494,7 @@ def run_video_convert(
             cells_h=cells_h,
             fps=fps,
             max_seconds=max_seconds,
+            max_part_bytes=max_part_bytes,
             overwrite=overwrite,
             skip_audio=skip_audio,
             log=log,
@@ -382,7 +519,7 @@ def run_video_convert(
     if done:
         _log(
             log,
-            "Next: put Song.dfpwm + Song.cvid beside each other under "
+            "Next: put Song.dfpwm + Song.cvid (or .cvid.1/.2) under "
             "music/Artist/Album/, then drag-drop via Importer (or copy onto the disk).",
         )
     return {

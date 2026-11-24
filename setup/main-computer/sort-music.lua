@@ -11,15 +11,18 @@
                  unless another same-size copy is confirmed kept
                  + prune leftover empty " 2" folders after merge
     2) SFX:    create /sfx ; move loose root SFX*.dfpwm into it (not audio-deduped)
-    3) Root:   loose root .dfpwm + .lrc → match/move onto disks; clear leftovers
-               Never deletes scripts (*.lua), startup, or library/system dirs
+    3) Root:   loose root .dfpwm + .lrc + .cvid/.cvid.N → match/move onto disks;
+               clear leftovers. Never deletes scripts (*.lua), startup, or system dirs
     4) Lyrics: match .lrc to library tracks, place beside songs, mirror /lyrics
-               (spills across disks when full). Sources:
+               (spills across disks when full — including beside when the song
+               disk is full). Sources:
                  • recursive: every .lrc under computer + disk + diskN
                    (flat drops, nested leftovers, pack trees)
                  • match: exact basename, normalized (track # / punct), [ti]/[ar],
                    "Artist - Title.lrc", fuzzy contain
                + remove duplicate .lrc for the same .dfpwm
+    5) Video:  .cvid / multipart .cvid.1/.2/.3 travel with relocated .dfpwm;
+               orphan packs are placed beside matching tracks across mounts
 
   Usage:
       sort-music                  -- dry-run preview (report only; no writes)
@@ -89,14 +92,16 @@ for _, a in ipairs(rawArgs) do
   elseif lower == "--help" or lower == "-h" then
     print("sort-music [--apply] [packDir] [--lyrics-only] [--no-lyrics] [--no-mirror]")
     print("  Dry-run by default (no writes). --apply writes.")
-    print("  Music nest + Singles + root cleanup + SFX + lyrics.")
+    print("  Music nest + Singles + root cleanup + SFX + lyrics + .cvid packs.")
     print("  Collision folders (Name 2) merge into Name only when Name already exists.")
     print("  Audio deletes OFF by default. Pass --dedupe to remove confirmed extras.")
     print("  Dupes: keep best .dfpwm+.lrc; never delete sole copy or protected album track")
     print("    unless another same-size copy is kept. Prefer keep-with-lyrics.")
-    print("  Root: move loose .dfpwm/.lrc onto disks; never deletes *.lua / startup.")
+    print("  Root: move loose .dfpwm/.lrc/.cvid onto disks; never deletes *.lua / startup.")
     print("  --safe / --no-dedupe keep audio deletes off. --dedupe opts them in.")
-    print("  Recursively finds .lrc; matches basename/tags/fuzzy; places beside .dfpwm.")
+    print("  Recursively finds .lrc; matches basename/tags/fuzzy; places beside .dfpwm")
+    print("    (spills to next free disk when the song disk is full).")
+    print("  .cvid / .cvid.1/.2/.3 travel with .dfpwm; orphans place across mounts.")
     print("  Drop flat .lrc on computer/disk root, then: sort-music --apply --lyrics-only")
     return
   elseif not a:match("^%-") then
@@ -141,11 +146,26 @@ local function isNfp(name)
   return type(name) == "string" and name:lower():match("%.nfp$") ~= nil
 end
 
+local function isCvidName(name)
+  if type(name) ~= "string" then return false end
+  local lower = name:lower()
+  return lower:match("%.cvid%.%d+$") ~= nil or lower:match("%.cvid$") ~= nil
+end
+
 local function isSfxName(name)
   return type(name) == "string" and name:lower():match("^sfx.*%.dfpwm$") ~= nil
 end
 
--- Move Song.lrc / Song.nfp / cover.nfp alongside a relocated .dfpwm.
+local function cvidNamesForStem(stem)
+  local names = { stem .. ".cvid", stem .. ".CVID" }
+  for i = 1, 8 do
+    names[#names + 1] = stem .. ".cvid." .. tostring(i)
+    names[#names + 1] = stem .. ".CVID." .. tostring(i)
+  end
+  return names
+end
+
+-- Move Song.lrc / Song.nfp / Song.cvid(.N) / cover.nfp alongside a relocated .dfpwm.
 local function moveAudioSidecars(srcDir, stem, destDir, destAudioName)
   local destStem = tostring(destAudioName or ""):gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
   if destStem == "" then destStem = stem end
@@ -156,6 +176,13 @@ local function moveAudioSidecars(srcDir, stem, destDir, destAudioName)
   local srcNfp = fs.combine(srcDir, stem .. ".nfp")
   if fs.exists(srcNfp) and not fs.isDir(srcNfp) then
     movePath(srcNfp, fs.combine(destDir, destStem .. ".nfp"))
+  end
+  for _, name in ipairs(cvidNamesForStem(stem)) do
+    local srcCvid = fs.combine(srcDir, name)
+    if fs.exists(srcCvid) and not fs.isDir(srcCvid) then
+      local suffix = name:sub(#stem + 1) -- ".cvid" or ".cvid.1"
+      movePath(srcCvid, fs.combine(destDir, destStem .. suffix))
+    end
   end
   -- Album-level cover art travels with the album folder (mergeDirInto), but
   -- when flattening a singles-title folder keep cover.nfp if present.
@@ -948,16 +975,17 @@ local function runMusic()
         local ok, err = deletePath(loser.path)
         if ok then
           deduped = deduped + 1
-          -- Drop orphan beside-.lrc on the loser so it doesn't linger without audio
-          if loser.hasLrc then
-            local base = loser.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
-            local beside = fs.combine(fs.getDir(loser.path), base .. ".lrc")
-            local keepBeside = fs.combine(
-              fs.getDir(keep.path),
-              keep.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc"
-            )
+          -- Drop orphan beside-.lrc / .cvid on the loser so they don't linger without audio
+          local loserStem = loser.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+          local keepStem = keep.name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+          local loserDir, keepDir = fs.getDir(loser.path), fs.getDir(keep.path)
+          local orphanNames = { loserStem .. ".lrc" }
+          for _, n in ipairs(cvidNamesForStem(loserStem)) do orphanNames[#orphanNames + 1] = n end
+          for _, name in ipairs(orphanNames) do
+            local beside = fs.combine(loserDir, name)
+            local keepBeside = fs.combine(keepDir, keepStem .. name:sub(#loserStem + 1))
             if beside ~= keepBeside and (opts.dryRun or (fs.exists(beside) and not fs.isDir(beside))) then
-              print((opts.dryRun and "  ~ would-delete orphan-lrc " or "  dedupe orphan-lrc ") .. beside)
+              print((opts.dryRun and "  ~ would-delete orphan-sidecar " or "  dedupe orphan-sidecar ") .. beside)
               deletePath(beside)
             end
           end
@@ -1329,6 +1357,61 @@ local function copyLyricsSpilling(src, relArtistAlbumFile, preferMount)
   return false, "spill exhausted", false
 end
 
+-- Place a sidecar beside the track; if that disk is full, copy into the same
+-- Artist/Album under another library root / floppy mount.
+local function copyBesideOrSpill(src, track, fileName)
+  local beside = fs.combine(fs.getDir(track.path), fileName)
+  if src == beside then return true, beside, false end
+  local need = fileSize(src) + RESERVE
+  local prefer = mountOf(track.path)
+  local preferPath = prefer == "" and "/" or prefer
+  if opts.dryRun or freeSpace(preferPath) >= need then
+    local ok, err = copyTo(src, beside)
+    if ok then return true, beside, false end
+    if not isOutOfSpace(tostring(err or "")) then
+      return false, err or "copy failed", false
+    end
+  end
+
+  local rel = fs.combine(track.artist or "Singles", track.album or "Singles", fileName)
+  local bad = {}
+  if prefer ~= "" then bad[prefer] = true end
+  for _, root in ipairs(uniqueLibraryRoots()) do
+    local m = mountOf(root)
+    local mpath = m == "" and "/" or m
+    if not bad[mpath] and (opts.dryRun or freeSpace(mpath) >= need) then
+      local dst = fs.combine(root, rel)
+      if src == dst then return true, dst, true end
+      local ok, err = copyTo(src, dst)
+      if ok then
+        print("  spill beside → " .. dst)
+        return true, dst, true
+      end
+      if isOutOfSpace(tostring(err or "")) then
+        bad[mpath] = true
+      else
+        return false, err or "copy failed", false
+      end
+    end
+  end
+  for _, m in ipairs(listFloppyMounts()) do
+    if not bad[m] and (opts.dryRun or freeSpace(m) >= need) then
+      local dst = fs.combine(m, "music", rel)
+      local ok, err = copyTo(src, dst)
+      if ok then
+        print("  spill beside → " .. dst)
+        return true, dst, true
+      end
+      if isOutOfSpace(tostring(err or "")) then
+        bad[m] = true
+      else
+        return false, err or "copy failed", false
+      end
+    end
+  end
+  return false, "no disk with room beside track", false
+end
+
 local function runLyrics()
   print(modeTag() .. "=== Lyrics (recursive find + match + beside + mirror + dedupe) ===")
 
@@ -1684,22 +1767,15 @@ local function runLyrics()
       local beside = fs.combine(fs.getDir(t.path), t.base .. ".lrc")
 
       if src ~= beside then
-        local need = fileSize(src) + RESERVE
-        local m = mountOf(t.path)
-        local mpath = m == "" and "/" or m
-        if freeSpace(mpath) < need and not opts.dryRun then
-          printError("  ! beside full on " .. (m == "" and "computer" or m) .. ": " .. beside)
-          errors = errors + 1
+        local ok, dstOrErr, didSpill = copyBesideOrSpill(src, t, t.base .. ".lrc")
+        if ok then
+          wrote = true
+          if didSpill then spilled = spilled + 1 end
+          print((opts.dryRun and "  ~ " or "  + ") .. "beside " .. tostring(dstOrErr))
+          consumedSources[src] = true
         else
-          local ok, err = copyTo(src, beside)
-          if ok then
-            wrote = true
-            print((opts.dryRun and "  ~ " or "  + ") .. "beside " .. beside)
-            consumedSources[src] = true
-          else
-            errors = errors + 1
-            printError("  ! " .. beside .. " — " .. tostring(err))
-          end
+          errors = errors + 1
+          printError("  ! beside " .. t.base .. ".lrc — " .. tostring(dstOrErr))
         end
       else
         consumedSources[src] = true
@@ -1905,27 +1981,51 @@ local function runRootCleanup(phase)
             local ok, err = movePath(path, dest)
             if ok then
               movedAudio = movedAudio + 1
-              -- Sibling .lrc / .nfp with same stem rides along
+              -- Sibling .lrc / .nfp / .cvid(.N) with same stem rides along
               local stem = name:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+              local destStem = dest:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
               local sib = stem .. ".lrc"
               if fs.exists(sib) and not fs.isDir(sib) and not isProtectedRootEntry(sib) then
-                local dstLrc = dest:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".lrc"
+                local dstLrc = destStem .. ".lrc"
                 print((opts.dryRun and "  ~ root-lrc " or "  root-lrc ")
                   .. sib .. " → " .. dstLrc)
                 if movePath(sib, dstLrc) then movedLrc = movedLrc + 1 end
               end
               local sibArt = stem .. ".nfp"
               if fs.exists(sibArt) and not fs.isDir(sibArt) and not isProtectedRootEntry(sibArt) then
-                local dstNfp = dest:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "") .. ".nfp"
+                local dstNfp = destStem .. ".nfp"
                 print((opts.dryRun and "  ~ root-nfp " or "  root-nfp ")
                   .. sibArt .. " → " .. dstNfp)
                 movePath(sibArt, dstNfp)
+              end
+              for _, cname in ipairs(cvidNamesForStem(stem)) do
+                if fs.exists(cname) and not fs.isDir(cname) and not isProtectedRootEntry(cname) then
+                  local dstCvid = destStem .. cname:sub(#stem + 1)
+                  print((opts.dryRun and "  ~ root-cvid " or "  root-cvid ")
+                    .. cname .. " → " .. dstCvid)
+                  movePath(cname, dstCvid)
+                end
               end
             else
               printError("  ! " .. tostring(err))
             end
           else
             printError("  ! no disk room for root audio " .. path)
+          end
+        elseif isCvidName(name) and phase == "late" then
+          -- Unmatched root video packs: park under lyrics-style inbox is wrong;
+          -- try to attach to a library track, else leave a leftover note.
+          local stem = name:gsub("%.[Cc][Vv][Ii][Dd]%.%d+$", ""):gsub("%.[Cc][Vv][Ii][Dd]$", "")
+          local dest = select(1, pickMusicDest(fileSize(path), stem .. ".dfpwm"))
+          if dest then
+            local destDir = fs.getDir(dest)
+            local dst = fs.combine(destDir, name)
+            print((opts.dryRun and "  ~ root-cvid " or "  root-cvid ")
+              .. path .. " → " .. dst)
+            local ok, err = movePath(path, dst)
+            if not ok then printError("  ! " .. tostring(err)) end
+          else
+            print("  leftover root cvid (no disk room / no album hint): " .. path)
           end
         elseif isLrc(name) and phase == "late" then
           -- After lyrics pass: anything still on root is unmatched or leftover.
@@ -1969,7 +2069,7 @@ local function runRootCleanup(phase)
   if phase == "late" and not opts.dryRun then
     for _, name in ipairs(listDir("")) do
       if not isProtectedRootEntry(name) and not fs.isDir(name) then
-        if isAudio(name) or isLrc(name) then
+        if isAudio(name) or isLrc(name) or isCvidName(name) then
           print("  leftover root media (could not move): " .. name)
         end
       end
@@ -1982,8 +2082,142 @@ local function runRootCleanup(phase)
   ))
 end
 
+------------------------------------------------------------------ 5) Video packs (.cvid / .cvid.N)
+local function runCvidPacks()
+  print(modeTag() .. "=== Video packs (.cvid / multipart .cvid.N) ===")
+  -- Build track index by song key
+  local tracks, seenPaths = {}, {}
+  local function addTrack(path, file, artistName, albumName)
+    if seenPaths[path] or not isAudio(file) then return end
+    seenPaths[path] = true
+    local base = file:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+    tracks[#tracks + 1] = {
+      path = path, artist = artistName, album = albumName, base = base,
+      keys = songKeys(base),
+    }
+  end
+  local function addAudioInDir(dir, artistName, albumName)
+    if not (fs.exists(dir) and fs.isDir(dir)) then return end
+    for _, file in ipairs(listDir(dir)) do
+      local fp = fs.combine(dir, file)
+      if not fs.isDir(fp) and isAudio(file) then
+        addTrack(fp, file, artistName, albumName)
+      end
+    end
+  end
+  local function scanArtistTree(root)
+    if not (fs.exists(root) and fs.isDir(root)) then return end
+    for _, entry in ipairs(listDir(root)) do
+      local entryPath = fs.combine(root, entry)
+      if fs.isDir(entryPath) then
+        local el = entry:lower()
+        if el == "music" then
+          scanArtistTree(entryPath)
+        elseif el ~= "lyrics" and el ~= "lyrics-pack" and el ~= "sfx" then
+          local children = listDir(entryPath)
+          local hasAlbumDirs, hasDirectAudio = false, false
+          for _, child in ipairs(children) do
+            local cp = fs.combine(entryPath, child)
+            if fs.isDir(cp) then hasAlbumDirs = true
+            elseif isAudio(child) then hasDirectAudio = true end
+          end
+          local parsedArtist, parsedAlbum = entry:match("^(.-) %- (.+)$")
+          if hasDirectAudio and parsedArtist then
+            addAudioInDir(entryPath, parsedArtist, parsedAlbum)
+          elseif hasAlbumDirs then
+            for _, albumName in ipairs(children) do
+              local albumPath = fs.combine(entryPath, albumName)
+              if fs.isDir(albumPath) then
+                addAudioInDir(albumPath, entry, albumName)
+              elseif isAudio(albumName) then
+                addTrack(albumPath, albumName, entry, "Singles")
+              end
+            end
+          elseif hasDirectAudio then
+            addAudioInDir(entryPath, "Various", entry)
+          end
+        end
+      elseif isAudio(entry) then
+        addTrack(entryPath, entry, "Singles", "Singles")
+      end
+    end
+  end
+  if fs.exists("music") and fs.isDir("music") then scanArtistTree("music") end
+  for _, m in ipairs(listFloppyMounts()) do scanArtistTree(m) end
+
+  local byKey = {}
+  for _, t in ipairs(tracks) do
+    for _, k in ipairs(t.keys) do
+      byKey[k] = byKey[k] or {}
+      byKey[k][#byKey[k] + 1] = t
+    end
+  end
+
+  local function lookupTrack(stem)
+    for _, k in ipairs(songKeys(stem)) do
+      local list = byKey[k]
+      if list and #list >= 1 then return list[1] end
+    end
+    return nil
+  end
+
+  local alreadyBeside = {}
+  for _, t in ipairs(tracks) do
+    for _, name in ipairs(cvidNamesForStem(t.base)) do
+      local p = fs.combine(fs.getDir(t.path), name)
+      if fs.exists(p) and not fs.isDir(p) then alreadyBeside[p] = true end
+    end
+  end
+
+  local found, placed, spilled, missing, errors = 0, 0, 0, 0, 0
+  local function walk(dir, depth)
+    if depth > 48 then return end
+    local listing = dir == "" and "" or dir
+    if dir ~= "" and not (fs.exists(dir) and fs.isDir(dir)) then return end
+    for _, name in ipairs(listDir(listing)) do
+      local fp = dir == "" and name or fs.combine(dir, name)
+      local okDir, isDir = pcall(fs.isDir, fp)
+      if okDir and isDir then
+        local low = name:lower()
+        if low ~= "rom" and low ~= "bios" and low ~= "sfx" then
+          walk(fp, depth + 1)
+        end
+      elseif isCvidName(name) and not alreadyBeside[fp] then
+        found = found + 1
+        local stem = name:gsub("%.[Cc][Vv][Ii][Dd]%.%d+$", ""):gsub("%.[Cc][Vv][Ii][Dd]$", "")
+        local track = lookupTrack(stem)
+        if not track then
+          missing = missing + 1
+        else
+          local destName = track.base .. name:sub(#stem + 1)
+          local ok, dstOrErr, didSpill = copyBesideOrSpill(fp, track, destName)
+          if ok then
+            placed = placed + 1
+            if didSpill then spilled = spilled + 1 end
+            print((opts.dryRun and "  ~ " or "  + ") .. "cvid " .. tostring(dstOrErr))
+            if not opts.dryRun and fp ~= dstOrErr then
+              local dropDir = fs.getDir(fp)
+              local drop = (dropDir == "" or dropDir == "inbox" or dropDir == "drops"
+                or dropDir:match("^disk%d*$"))
+              if drop then pcall(fs.delete, fp) end
+            end
+          else
+            errors = errors + 1
+            printError("  ! cvid " .. fp .. " — " .. tostring(dstOrErr))
+          end
+        end
+      end
+    end
+  end
+  walk("", 0)
+  print(string.format(
+    "  cvid: found=%d placed=%d spilled=%d missing=%d errors=%d",
+    found, placed, spilled, missing, errors
+  ))
+end
+
 ------------------------------------------------------------------ main
-print(modeTag() .. "sort-music — music + sfx + root + lyrics")
+print(modeTag() .. "sort-music — music + sfx + root + lyrics + cvid")
 if opts.dryRun then
   print("Preview only (reports moves + merges + would-deletes). Re-run with --apply to write.")
   if opts.dedupe then
@@ -1996,7 +2230,7 @@ elseif opts.dedupe then
   print("Never deletes sole copies or protected Artist/Album tracks without a kept same-size twin.")
   print("Collision folders (Name 2) merge into Name only when Name exists.")
 else
-  print("Audio dupe cleanup OFF (default). Nest/Singles/root/SFX/lyrics only — albums survive.")
+  print("Audio dupe cleanup OFF (default). Nest/Singles/root/SFX/lyrics/cvid only — albums survive.")
   print("Pass --dedupe to delete confirmed audio extras. --safe / --no-dedupe keep deletes off.")
 end
 
@@ -2004,6 +2238,7 @@ if opts.doSfx then runSfx() end
 if opts.doRoot then runRootCleanup("early") end
 if opts.doMusic then runMusic() end
 if opts.doLyrics then runLyrics() end
+if opts.doLyrics or opts.doMusic then runCvidPacks() end
 if opts.doRoot then runRootCleanup("late") end
 
 print("---")
