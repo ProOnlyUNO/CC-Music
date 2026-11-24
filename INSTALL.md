@@ -11,7 +11,7 @@ Paste-ready scripts live in this folder:
 - `lyrics-status.lua` — quick count of tracks with/missing beside `.lrc`
 - `lyrics-import.lua` / `sort-lyrics.lua` — thin wrappers → `sort-music --lyrics-only`
 - `pocket.lua` — Pocket Advanced Computer remote
-- `Importer.lua` — drag-drop `.dfpwm` + `.lrc` + `.nfp` art (writes `music/<Artist - Album>/`; places matched lyrics/art beside songs)
+- `Importer.lua` — drag-drop `.dfpwm` + `.lrc` + `.nfp` / `.png` / `.jpg` art (writes `music/<Artist>/<Album>/`; places matched lyrics/art beside songs; prompts when art has no match)
 
 Protocols:
 
@@ -74,9 +74,11 @@ Duplicate paths across roots are ignored once.
 
 Replace any old `uploader.lua` (or earlier Importer) with `docs/Importer.lua`. Save it on the computer as **`Importer.lua`** or **`uploader.lua`** — either name works; run `Importer` or `uploader` to match the filename.
 
-Layout: disk label = artist, new audio goes to `music/<Artist - Album>/song.dfpwm` with multi-disk spill. Blank album → folder named after the artist (singles). Drag-drop UX, disk labeling, reserve space, and skipDuplicates are unchanged.
+Layout: disk label = artist, new audio goes to `music/<Artist>/<Album>/song.dfpwm` with multi-disk spill. Blank album → **Singles**. Legacy flat `music/<Artist - Album>/` is still matched. Drag-drop UX, disk labeling, reserve space, and skipDuplicates are unchanged.
 
 Also accepts **`.lrc`** drops: matches to a library `.dfpwm` (basename / normalized / `Artist - Title` / tags; prefers the current artist/album session and same-drop pairs), writes beside that song, optional `/lyrics` mirror with spill, prints match/miss. Prefer Importer for new lyric drops; keep `sort-music --apply --lyrics-only` for bulk orphans already on the computer. Details: `fetch-lyrics.md`.
+
+Also accepts **`.nfp` / `.png` / `.jpg`** art: cover-named files → album `cover.*`; song-named → beside the matching `.dfpwm`. If nothing matches, Importer prompts for Artist + Album. Jukebox thumbs need `.nfp` — use desktop **Convert** (PNG/JPG → `cover.nfp`) before dropping when you want in-game art. See `docs-cover-art-howto.md`.
 
 ### Optional: one-shot sort (music + SFX + lyrics)
 
