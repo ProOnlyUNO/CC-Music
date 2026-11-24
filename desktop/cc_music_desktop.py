@@ -6,7 +6,7 @@ Developer: ProOnlyUNO
 
 Tabs:
   Download  — YouTube search/URL or Genius album → select tracks → MP3 (yt-dlp)
-  Convert   — MP3/WAV/… → .dfpwm (needs ffmpeg 5.1+)
+  Convert   — MP3/WAV/… → .dfpwm + PNG/JPG → cover.nfp (needs ffmpeg 5.1+ / Pillow)
   Lyrics    — LRCLIB public API → .lrc beside tracks + pack
   How to use / Commands
 """
@@ -27,6 +27,7 @@ import convert_core
 import download_core
 import genius_core
 import lyrics_core
+import nfp_core
 import update_check
 
 APP_TITLE = "CC Music Tools"
@@ -941,7 +942,8 @@ class App(tk.Tk):
             parent,
             text=(
                 "Requires ffmpeg 5.1+ on PATH. Output is Artist/Album/Song.dfpwm "
-                "(tags + folder layout). Sibling .lrc files are copied beside each .dfpwm."
+                "(tags + folder layout). Sibling .lrc files are copied beside each .dfpwm; "
+                "cover PNG/JPG / embedded art become Song.nfp + cover.nfp (96×96 CC palette)."
             ),
             wraplength=740,
             style="Dim.TLabel",
@@ -954,6 +956,37 @@ class App(tk.Tk):
             text="Convert to DFPWM",
             style="Accent.TButton",
             command=self._start_convert,
+        ).pack(side="left")
+
+        # --- Album art → cover.nfp (standalone, batch-friendly) ---
+        art = ttk.LabelFrame(parent, text="Album art → cover.nfp", padding=8)
+        art.pack(fill="x", pady=(14, 0))
+        self.art_input = tk.StringVar()
+        self.art_overwrite = tk.BooleanVar(value=False)
+        self._path_row(art, "PNG/JPG or Artist/Album folder", self.art_input, self._pick_art_input)
+        ttk.Checkbutton(
+            art,
+            text="Overwrite existing cover.nfp",
+            variable=self.art_overwrite,
+        ).pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            art,
+            text=(
+                f"Writes cover.nfp next to the album’s song files (same Artist/Album layout as "
+                f"downloads). Uses the fixed decode-compatible pipeline: "
+                f"{nfp_core.DEFAULT_NFP_SIZE}×{nfp_core.DEFAULT_NFP_SIZE}, official CC palette, BOX resize. "
+                f"Pick one image, several images, an album folder, or a library root to batch."
+            ),
+            wraplength=740,
+            style="Dim.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
+        art_actions = ttk.Frame(art)
+        art_actions.pack(fill="x", pady=(8, 0))
+        ttk.Button(
+            art_actions,
+            text="Convert cover art",
+            style="Accent.TButton",
+            command=self._start_art_convert,
         ).pack(side="left")
 
     def _build_lyrics(self, parent: ttk.Frame) -> None:
@@ -1041,12 +1074,15 @@ Open setup/ next to this app (START_HERE.txt) for which .lua goes on which compu
       Needs yt-dlp:  python -m pip install -U yt-dlp
       Alternate (browser only): {YTMP3_ALT_URL}
    b. Convert — Browse the Artist/Album folder → Convert to DFPWM
-      Output: Artist/Album/Song.dfpwm (+ copies sibling .lrc)
+      Output: Artist/Album/Song.dfpwm (+ copies sibling .lrc + .nfp art)
       (needs ffmpeg 5.1+ on PATH: winget install ffmpeg)
+   b2. Album art — on the same Convert tab, pick PNG/JPG or an Artist/Album
+      (or library) folder → Convert cover art → writes cover.nfp (96×96)
+      next to the songs. Batch-friendly; overwrite optional.
    c. Fetch lyrics — still available for libraries that need a re-scan
    d. Open output folder, copy Artist/Album trees into Minecraft
    e. In-game: run Importer → drag-drop onto the computer screen (not a monitor)
-   f. Restart jukebox (or F5) — songs with lyrics show (L)
+   f. Restart jukebox (or F5) — songs with lyrics show (L); cover.nfp shows thumbs
 
 That’s the whole loop. Use Dry run anytime for a preview with no writes.
 See the Commands tab for the short in-game cheat sheet.
@@ -1147,6 +1183,31 @@ You’re set — enjoy the music.
             # Store as | separated for multi-file
             self.conv_input.set("|".join(paths))
 
+    def _pick_art_input(self) -> None:
+        choice = messagebox.askyesnocancel(
+            "Select album art",
+            "Yes = pick an Artist/Album (or library) folder\n"
+            "No = pick one or more PNG/JPG images\n"
+            "Cancel = abort",
+            icon="question",
+        )
+        if choice is None:
+            return
+        if choice:
+            self._pick_dir(self.art_input)
+            return
+        initial = self.art_input.get().strip() or str(Path.home() / "Downloads")
+        paths = filedialog.askopenfilenames(
+            title="Select cover images",
+            initialdir=initial if Path(initial).is_dir() else (str(Path(initial).parent) if initial else None),
+            filetypes=[
+                ("Images", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                ("All files", "*.*"),
+            ],
+        )
+        if paths:
+            self.art_input.set("|".join(paths))
+
     # ----------------------------------------------------------------- log
     def _append_log(self, msg: str) -> None:
         self.log.configure(state="normal")
@@ -1193,7 +1254,7 @@ You’re set — enjoy the music.
         def apply() -> None:
             self.prog_detail.set(detail)
             # Overall bar
-            if phase in ("overall", "fetch", "search", "organize", "convert", "lyrics_batch"):
+            if phase in ("overall", "fetch", "search", "organize", "convert", "art", "lyrics_batch"):
                 if frac is None:
                     if str(self.prog_overall["mode"]) != "indeterminate":
                         self.prog_overall.configure(mode="indeterminate")
@@ -1214,7 +1275,7 @@ You’re set — enjoy the music.
                         self.prog_track.stop()
                         self.prog_track.configure(mode="determinate")
                     self.prog_track_var.set(max(0.0, min(100.0, frac * 100.0)))
-            elif phase in ("organize", "convert", "lyrics_batch", "overall"):
+            elif phase in ("organize", "convert", "art", "lyrics_batch", "overall"):
                 # Mirror overall into current when there's no separate track metric
                 if phase != "overall" and frac is not None:
                     if str(self.prog_track["mode"]) != "determinate":
@@ -1683,6 +1744,56 @@ You’re set — enjoy the music.
                     progress=self._ui_progress,
                     should_cancel=lambda: self._cancel,
                 )
+            except Exception as e:  # noqa: BLE001
+                self._ui_log(f"ERROR: {e}")
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_art_convert(self) -> None:
+        if self._busy:
+            messagebox.showwarning(APP_TITLE, "A job is already running.")
+            return
+        raw = self.art_input.get().strip()
+        if not raw:
+            messagebox.showerror(
+                APP_TITLE,
+                "Pick a PNG/JPG (or several), an album folder, or a library root first.",
+            )
+            return
+        inputs = [p for p in raw.split("|") if p]
+        for p in inputs:
+            if not Path(p).exists():
+                messagebox.showerror(APP_TITLE, f"Path not found:\n{p}")
+                return
+
+        self._cancel = False
+        self._set_busy(True)
+        self._append_log("--- Album art → cover.nfp ---")
+        first = Path(inputs[0])
+        self._last_out = first if first.is_dir() else first.parent
+        self._ui_progress("art", 0.0, "Converting cover art…")
+
+        overwrite = self.art_overwrite.get()
+
+        def work() -> None:
+            try:
+                summary = nfp_core.batch_write_cover_nfp(
+                    inputs,
+                    size=nfp_core.DEFAULT_NFP_SIZE,
+                    overwrite=overwrite,
+                    log=self._ui_log,
+                )
+                done = summary.get("done", 0)
+                self._ui_progress(
+                    "art",
+                    1.0,
+                    f"Cover art done — wrote {done}, skipped {summary.get('skipped', 0)}",
+                )
+                if done and summary.get("paths"):
+                    last = Path(summary["paths"][-1])
+                    self.after(0, lambda: setattr(self, "_last_out", last.parent))
             except Exception as e:  # noqa: BLE001
                 self._ui_log(f"ERROR: {e}")
             finally:
