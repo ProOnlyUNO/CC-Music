@@ -3,9 +3,11 @@
   Listens on rednet protocol "jukebox_viz" from the main jukebox.
 
   Tuned for 4×4 Advanced Monitors at text scale 0.5 (~120×80).
-  Fancy viz: spectrum bars with peak caps + glow-ish CC color ramps,
-  mirrored waveform, center bloom, energy-tied color cycle, stage-light
-  corners, chrome frame accents, rising particles. Idle/paused → calm breath.
+  Aurora-inspired mode looks (friend 40_canvas / 30_theme / 80_audio /
+  85_player patterns) for BARS / WAVE / VU while keeping the 4×4 stage
+  chrome: peak caps, filled mid-wave, dual RMS/peak VU, LIVE PCM badge,
+  accent-tier palette from jukebox packet, center bloom, particles.
+  Idle/paused → calm breath.
 
   Lyrics mode: when main toggles LYRICS (packet lyricsOn=true) and a lyric
   line is present, bump text scale (~2.5) for big karaoke-style lines on
@@ -139,6 +141,39 @@ pcall(mon.setTextScale, CONFIG.monitorScale)
 -- Appearance / mode from jukebox (jukebox_viz packet fields vizMode, accent, anim)
 local VIZ_MODE = "bars"  -- bars | wave | vu | off
 local VIZ_ANIM = true
+local VIZ_ACCENT = "violet"  -- matches jukebox ACCENTS keys
+
+-- Jukebox accent → CC color (Aurora theme idea: accentDim / accent / accentLight)
+local ACCENT_MAP = {
+  teal   = colors.lightBlue,
+  azure  = colors.blue,
+  amber  = colors.yellow,
+  rose   = colors.red,
+  violet = colors.purple,
+  lime   = colors.lime,
+  ice    = colors.white,
+  coral  = colors.orange,
+}
+local ACCENT_DIM_MAP = {
+  teal   = colors.blue,
+  azure  = colors.gray,
+  amber  = colors.orange,
+  rose   = colors.magenta,
+  violet = colors.magenta,
+  lime   = colors.green,
+  ice    = colors.lightGray,
+  coral  = colors.red,
+}
+local ACCENT_LIGHT_MAP = {
+  teal   = colors.white,
+  azure  = colors.lightBlue,
+  amber  = colors.white,
+  rose   = colors.pink,
+  violet = colors.pink,
+  lime   = colors.white,
+  ice    = colors.white,
+  coral  = colors.yellow,
+}
 
 local W, H = mon.getSize()
 local lyricsModeActive = false
@@ -253,6 +288,25 @@ local function cycleCol(ramp, phase)
   local n = #ramp
   local i = math.floor(phase % n) + 1
   return ramp[i]
+end
+
+-- Aurora-style accent tiers: dim (<0.33) / mid (<0.66) / light
+local function accentBase()
+  return ACCENT_MAP[VIZ_ACCENT] or colors.purple
+end
+
+local function accentDim()
+  return ACCENT_DIM_MAP[VIZ_ACCENT] or colors.magenta
+end
+
+local function accentLight()
+  return ACCENT_LIGHT_MAP[VIZ_ACCENT] or colors.pink
+end
+
+local function accentTier(level)
+  if level > 0.66 then return accentLight() end
+  if level > 0.33 then return accentBase() end
+  return accentDim()
 end
 
 ------------------------------------------------------------------ layout / budgets from size
@@ -409,8 +463,11 @@ local function applyPacket(m)
   if type(m.pos) == "number" then RX.pos = m.pos end
   if type(m.dur) == "number" then RX.dur = m.dur end
   if m.lyricsOn ~= nil then RX.lyricsOn = m.lyricsOn and true or false end
-    if m.vizMode then VIZ_MODE = tostring(m.vizMode):lower() end
-    if m.anim ~= nil then VIZ_ANIM = not not m.anim end
+  if m.vizMode then VIZ_MODE = tostring(m.vizMode):lower() end
+  if m.anim ~= nil then VIZ_ANIM = not not m.anim end
+  if type(m.accent) == "string" and ACCENT_MAP[m.accent] then
+    VIZ_ACCENT = m.accent
+  end
   if type(m.lyric) == "string" then RX.lyric = m.lyric end
   RX.e = levelOf(m.e)
   RX.peak = levelOf(m.peak)
@@ -840,7 +897,8 @@ local function smooth(dt)
   -- Lyrics big-text mode only when a line is present; empty lyric keeps viz particles.
   local hasLyric = RX.lyricsOn and type(RX.lyric) == "string" and RX.lyric ~= ""
   local mode = hasLyric and "lyrics" or "viz"
-  updateParticles(dt, DISP.e, playing, mode)
+  -- Respect jukebox animations flag (Aurora App.cfg.animations / packet anim)
+  updateParticles(dt, DISP.e, playing and VIZ_ANIM, mode)
 end
 
 ------------------------------------------------------------------ draw
@@ -898,13 +956,13 @@ local function draw()
     drawChrome(playing, borderCol)
   end
 
-  -- stage lights (corners + chase ticks)
-  if VIZ_MODE ~= "off" then
+  -- stage lights (corners + chase ticks) — skip when jukebox animations off
+  if VIZ_MODE ~= "off" and VIZ_ANIM then
     drawStageLights(playing, DISP.e)
   end
 
   -- center bloom (few cells, on hits / energy)
-  if VIZ_MODE ~= "off" and playing and DISP.e > 0.22 then
+  if VIZ_MODE ~= "off" and VIZ_ANIM and playing and DISP.e > 0.22 then
     local cx, cy = math.floor(W / 2), math.floor(H / 2)
     local r = math.floor(1 + DISP.e * 3.2 + DISP.hit * 2.4 + DISP.bass * 1.2)
     local bloomCol = cycleCol(BLOOM_COLS, DISP.hue + DISP.bass)
@@ -966,111 +1024,245 @@ local function draw()
   end
 
   -- MODE GATES: bars / wave / vu / off from jukebox APPEARANCE (VIZ_MODE set on packet)
-  -- spectrum bars (with glow tips + peak caps)
-  if VIZ_MODE == "bars" or VIZ_MODE == "vu" then
-  local gap = 1
-  local totalGap = (displayBands - 1) * gap
-  local barW = math.max(1, math.floor((W - 4 - totalGap) / displayBands))
-  local used = displayBands * barW + totalGap
-  local x0 = math.floor((W - used) / 2) + 1
-  local breathAmp = (idle or paused) and (0.08 + 0.06 * math.sin(DISP.breath)) or 0
+  -- Aurora Screens.visualizer patterns scaled for 4×4 + peak/glow polish.
 
-  for i = 1, displayBands do
-    local bi = MIRROR and (displayBands - i + 1) or i
-    local level = DISP.bands[bi]
-    if breathAmp > 0 then
-      level = breathAmp * (0.5 + 0.5 * math.sin(DISP.breath + i * 0.35))
+  ------------------------------------------------------------------ BARS
+  -- Accent-tier spectrum (dim/mid/light) + peak caps + soft tip glow.
+  if VIZ_MODE == "bars" then
+    -- Aurora uses ~2-wide bars with 1-col gap; clamp density to monitor width.
+    local gap = 1
+    local preferW = 2
+    local n = math.min(displayBands, math.max(8, math.floor((W - 4) / (preferW + gap))))
+    local barW = preferW
+    local used = n * barW + (n - 1) * gap
+    if used > W - 4 then
+      barW = 1
+      used = n * barW + (n - 1) * gap
     end
-    local h = math.floor(level * barMaxH + 0.5)
-    if h < 0 then h = 0 elseif h > barMaxH then h = barMaxH end
-    local x = x0 + (i - 1) * (barW + gap)
-    -- slight per-bar hue shift from global cycle + band index
-    local colT = clamp01(level * 0.85 + 0.15 * ((math.sin(DISP.hue + i * 0.2) + 1) * 0.5))
-    local col = barColor(colT, hot)
-    mon.setBackgroundColor(col)
-    mon.setTextColor(col)
-    for dy = 0, h - 1 do
-      -- vertical color ramp: hotter near tip
-      if h > 3 and dy >= h - 2 then
-        mon.setBackgroundColor(barColor(clamp01(level + 0.15), hot))
-      elseif h > 5 and dy <= 1 then
-        mon.setBackgroundColor(barGlowColor(level * 0.55))
-      else
-        mon.setBackgroundColor(col)
+    local x0 = math.floor((W - used) / 2) + 1
+    local breathAmp = (idle or paused) and (0.08 + 0.06 * math.sin(DISP.breath)) or 0
+
+    for i = 1, n do
+      local bi = MIRROR and (n - i + 1) or i
+      -- map display band into DISP.bands
+      local src = math.floor((bi - 0.5) * displayBands / n) + 1
+      if src < 1 then src = 1 elseif src > displayBands then src = displayBands end
+      local level = DISP.bands[src] or 0
+      if breathAmp > 0 then
+        level = breathAmp * (0.5 + 0.5 * math.sin(DISP.breath + i * 0.35))
       end
-      mon.setCursorPos(x, barBottom - dy)
-      mon.write((" "):rep(barW))
-    end
-    -- glow-ish tip: dimmer cell above bar using adjacent ramp color
-    if playing and h >= 2 and h < barMaxH then
-      mon.setBackgroundColor(BG)
-      mon.setTextColor(barGlowColor(clamp01(level + 0.2)))
-      mon.setCursorPos(x, barBottom - h)
-      mon.write(("^"):rep(barW))
-    end
-    -- peak hold caps
-    local ph = math.floor(DISP.peaks[bi] * barMaxH + 0.5)
-    if ph > h and ph >= 1 and playing then
-      mon.setBackgroundColor(colors.white)
-      mon.setTextColor(colors.white)
-      mon.setCursorPos(x, barBottom - ph)
-      mon.write((" "):rep(barW))
-      -- soft peak trail one below if room
-      if ph - 1 > h and ph - 1 >= 1 then
+      local h = math.floor(level * barMaxH + 0.5)
+      if h < 0 then h = 0 elseif h > barMaxH then h = barMaxH end
+      local x = x0 + (i - 1) * (barW + gap)
+      local col = accentTier(level)
+      -- soft energy blend toward spectrum ramp on very hot hits
+      if hot and level > 0.75 then
+        col = barColor(clamp01(level), true)
+      end
+      for dy = 0, h - 1 do
+        if h > 4 and dy >= h - 2 then
+          mon.setBackgroundColor(accentLight())
+        elseif h > 6 and dy <= 1 then
+          mon.setBackgroundColor(accentDim())
+        else
+          mon.setBackgroundColor(col)
+        end
+        mon.setCursorPos(x, barBottom - dy)
+        mon.write((" "):rep(barW))
+      end
+      if playing and h >= 2 and h < barMaxH then
         mon.setBackgroundColor(BG)
-        mon.setTextColor(hot and colors.yellow or colors.lightBlue)
-        mon.setCursorPos(x, barBottom - (ph - 1))
-        mon.write(("-"):rep(barW))
+        mon.setTextColor(accentLight())
+        mon.setCursorPos(x, barBottom - h)
+        mon.write(("^"):rep(barW))
       end
-    end
-  end
-
-  end -- bars/vu
-
-  if VIZ_MODE == "wave" then
-  -- mirrored waveform through the middle (thicker / dual-tone on energy)
-  if playing or paused then
-    mon.setBackgroundColor(BG)
-    local amp = math.floor(H * (0.11 + DISP.e * 0.05))
-    if amp < 2 then amp = 2 end
-    local wcol = cycleCol(WAVE_COLS, DISP.hue + DISP.e)
-    local wcol2 = cycleCol(WAVE_COLS, DISP.hue + 2)
-    for i = 1, waveDrawN do
-      local s = DISP.wave[i]
-      local y = waveY - math.floor(s * amp + 0.5)
-      if y < 2 then y = 2 elseif y > H - 1 then y = H - 1 end
-      local x = math.floor((i - 0.5) / waveDrawN * (W - 2)) + 2
-      if MIRROR then x = W - x + 1 end
-      mon.setTextColor(wcol)
-      mon.setCursorPos(x, y)
-      mon.write((math.abs(s) > 0.55 and "=") or "~")
-      local y2 = waveY + (waveY - y)
-      if y2 >= 2 and y2 <= H - 1 and y2 ~= y then
-        mon.setTextColor(wcol2)
-        mon.setCursorPos(x, y2)
-        mon.write((DISP.e > 0.45 and "~") or ".")
-      end
-      -- mid fill spark on strong samples
-      if playing and math.abs(s) > 0.7 and DISP.e > 0.4 then
-        local ym = math.floor((y + y2) / 2)
-        if ym >= 2 and ym <= H - 1 and ym ~= y and ym ~= y2 then
-          mon.setTextColor(colors.white)
-          mon.setCursorPos(x, ym)
-          mon.write(".")
+      local pk = DISP.peaks[src] or 0
+      local ph = math.floor(pk * barMaxH + 0.5)
+      if ph > h and ph >= 1 and playing then
+        mon.setBackgroundColor(colors.white)
+        mon.setCursorPos(x, barBottom - ph)
+        mon.write((" "):rep(barW))
+        if ph - 1 > h and ph - 1 >= 1 then
+          mon.setBackgroundColor(BG)
+          mon.setTextColor(accentBase())
+          mon.setCursorPos(x, barBottom - (ph - 1))
+          mon.write(("-"):rep(barW))
         end
       end
     end
-  end
+  end -- bars
+
+  ------------------------------------------------------------------ WAVE
+  -- Aurora: mid-centered filled columns from PCM wave peaks (not outline tildes).
+  if VIZ_MODE == "wave" then
+    if playing or paused or idle then
+      local amp = math.floor(barMaxH * (0.42 + DISP.e * 0.18))
+      if amp < 3 then amp = 3 end
+      if idle or paused then
+        amp = math.max(2, math.floor(amp * 0.35 + 1.5 * math.sin(DISP.breath)))
+      end
+      local mid = waveY
+      local n = math.min(waveDrawN, W - 4)
+      for i = 1, n do
+        local s = DISP.wave[i] or 0
+        if idle or paused then
+          s = 0.12 + 0.1 * math.sin(DISP.breath + i * 0.22)
+        end
+        local hh = math.max(1, math.floor(math.abs(s) * amp + 0.5))
+        local x = math.floor((i - 0.5) / n * (W - 4)) + 2
+        if MIRROR then x = W - x + 1 end
+        local col = (i % 3 == 0) and accentLight() or accentBase()
+        if math.abs(s) > 0.7 then col = accentLight() end
+        local y0 = mid - hh + 1
+        local hFill = hh * 2 - 1
+        if y0 < 3 then
+          hFill = hFill - (3 - y0)
+          y0 = 3
+        end
+        if y0 + hFill - 1 > H - 2 then
+          hFill = (H - 2) - y0 + 1
+        end
+        if hFill > 0 then
+          mon.setBackgroundColor(col)
+          for dy = 0, hFill - 1 do
+            mon.setCursorPos(x, y0 + dy)
+            mon.write(" ")
+          end
+        end
+        -- bright crest tick
+        if playing and math.abs(s) > 0.55 then
+          mon.setBackgroundColor(BG)
+          mon.setTextColor(colors.white)
+          local cy = mid - hh
+          if cy >= 3 and cy <= H - 2 then
+            mon.setCursorPos(x, cy)
+            mon.write(".")
+          end
+        end
+      end
+    end
   end -- wave
 
+  ------------------------------------------------------------------ VU
+  -- Aurora dual meters: RMS (e) + Peak, scaled for 4×4 with segment tiers + hold.
+  if VIZ_MODE == "vu" then
+    local meterTop = math.max(4, math.floor(H * 0.28))
+    local meterH = math.max(2, math.floor(H * 0.12))
+    local gapY = math.max(2, math.floor(H * 0.08))
+    local labelW = 6
+    local x1 = 3 + labelW
+    local bw = math.max(8, W - x1 - 4)
+    local rms = DISP.e
+    local peak = DISP.peak
+    if idle or paused then
+      local pulse = 0.08 + 0.06 * math.sin(DISP.breath)
+      rms, peak = pulse, pulse * 1.2
+    end
+    -- soft hold so peak needle doesn't collapse between packets
+    if peak < DISP.peak then peak = DISP.peak end
+
+    local function drawMeter(y, level, label, useLight)
+      mon.setBackgroundColor(BG)
+      mon.setTextColor(FG_DIM)
+      mon.setCursorPos(3, y)
+      mon.write(label)
+      -- track
+      mon.setBackgroundColor(colors.gray)
+      for dy = 0, meterH - 1 do
+        mon.setCursorPos(x1, y + dy)
+        mon.write((" "):rep(bw))
+      end
+      local fill = math.floor(clamp01(level) * bw + 0.5)
+      if fill < 0 then fill = 0 elseif fill > bw then fill = bw end
+      -- segmented fill with accent tiers (Aurora progressBar feel)
+      for sx = 0, fill - 1 do
+        local t = (sx + 0.5) / bw
+        local col
+        if t > 0.85 then
+          col = colors.white
+        elseif t > 0.66 then
+          col = useLight and accentLight() or accentBase()
+        elseif t > 0.33 then
+          col = accentBase()
+        else
+          col = accentDim()
+        end
+        mon.setBackgroundColor(col)
+        for dy = 0, meterH - 1 do
+          mon.setCursorPos(x1 + sx, y + dy)
+          mon.write(" ")
+        end
+      end
+      -- peak tick
+      local px = x1 + math.max(0, math.min(bw - 1, fill))
+      mon.setBackgroundColor(colors.white)
+      for dy = 0, meterH - 1 do
+        mon.setCursorPos(px, y + dy)
+        mon.write(" ")
+      end
+      mon.setBackgroundColor(BG)
+      mon.setTextColor(FG_DIM)
+      mon.setCursorPos(x1 + bw - 2, y)
+      mon.write(label == "RMS" and "VU" or "PK")
+    end
+
+    drawMeter(meterTop, rms, "RMS", false)
+    drawMeter(meterTop + meterH + gapY, peak, "PEAK", true)
+
+    -- stereo-ish side buds from low/high band halves (PCM band energy)
+    local leftE, rightE, ln, rn = 0, 0, 0, 0
+    local half = math.floor(displayBands / 2)
+    for i = 1, half do
+      leftE = leftE + (DISP.bands[i] or 0); ln = ln + 1
+    end
+    for i = half + 1, displayBands do
+      rightE = rightE + (DISP.bands[i] or 0); rn = rn + 1
+    end
+    leftE = ln > 0 and (leftE / ln) or 0
+    rightE = rn > 0 and (rightE / rn) or 0
+    local budY = meterTop + meterH * 2 + gapY * 2 + 1
+    if budY + 2 <= H - 2 then
+      mon.setBackgroundColor(BG)
+      mon.setTextColor(FG_DIM)
+      mon.setCursorPos(3, budY)
+      mon.write("L")
+      mon.setCursorPos(3, budY + 2)
+      mon.write("R")
+      local budW = bw
+      local function bud(y, level)
+        local f = math.floor(clamp01(level) * budW + 0.5)
+        mon.setBackgroundColor(colors.gray)
+        mon.setCursorPos(x1, y)
+        mon.write((" "):rep(budW))
+        mon.setBackgroundColor(accentTier(level))
+        if f > 0 then
+          mon.setCursorPos(x1, y)
+          mon.write((" "):rep(f))
+        end
+      end
+      bud(budY, MIRROR and rightE or leftE)
+      bud(budY + 2, MIRROR and leftE or rightE)
+    end
+  end -- vu
+
   -- particles
-  if VIZ_MODE ~= "off" then
+  if VIZ_MODE ~= "off" and VIZ_ANIM then
     drawParticles(2, H - 1)
   end
 
-  -- side label (dim chrome)
+  -- LIVE PCM badge (Aurora Screens.visualizer) + side label
   mon.setBackgroundColor(BG)
-  mon.setTextColor(playing and cycleCol(STAGE_COLS, DISP.hue) or colors.gray)
+  if playing and VIZ_MODE ~= "off" then
+    mon.setTextColor(accentBase())
+    local badge = "LIVE PCM"
+    mon.setCursorPos(math.max(1, 2), H)
+    mon.write(badge)
+  elseif paused and VIZ_MODE ~= "off" then
+    mon.setTextColor(FG_DIM)
+    mon.setCursorPos(2, H)
+    mon.write("PAUSED")
+  end
+  mon.setTextColor(playing and accentLight() or colors.gray)
   mon.setCursorPos(W - 5, H)
   mon.write(SIDE == "right" and " RIGHT" or "  LEFT")
 end
