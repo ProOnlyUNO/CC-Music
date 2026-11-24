@@ -5,7 +5,7 @@ One Windows desktop app for preparing music for a **CC:Tweaked** jukebox — plu
 **Developer: ProOnlyUNO** · v1.0.0
 
 1. **Download** — YouTube playlist/album **or Genius album** → MP3 (yt-dlp) → auto LRCLIB lyrics → optional **Artist/Album** folders
-2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc` + `.nfp` art from cover PNG/JPG / embedded art)
+2. **Convert** — MP3 / WAV / FLAC / … → `Artist/Album/Song.dfpwm` (+ sibling `.lrc` + `.nfp` art from cover PNG/JPG / embedded art). Same tab: **Album art → cover.nfp** for standalone PNG/JPG or folder batch (96×96 CC palette).
 3. **Fetch lyrics** — public [LRCLIB](https://lrclib.net) API → `.lrc` beside tracks + a pack folder
 4. **How to use** / **Commands** — friendly in-app guides
 
@@ -76,7 +76,7 @@ Start with **`setup/START_HERE.txt`**.
 | Tab | Purpose |
 |-----|---------|
 | **Download** | YouTube or Genius album → checklist → MP3 (yt-dlp) |
-| **Convert** | Folder or audio files → `.dfpwm` |
+| **Convert** | Folder or audio files → `.dfpwm`; PNG/JPG or album folder → `cover.nfp` |
 | **Fetch lyrics** | `.dfpwm` library → `.lrc` + pack |
 | **How to use** | Full friendly guide (points at `setup/`) |
 | **Commands** | Short cheat sheet: startup, viz sides, `pocket.lua`, sort/delete/Importer |
@@ -120,7 +120,8 @@ build_setup.bat
 | Need | Required? |
 |------|-----------|
 | Download tab | **yt-dlp** + **ffmpeg** (for MP3 extract) |
-| Convert tab | **ffmpeg 5.1+** with `dfpwm` |
+| Convert tab (audio) | **ffmpeg 5.1+** with `dfpwm` |
+| Convert tab (cover.nfp) | **Pillow** (bundled in the exe) |
 | Fetch lyrics | No (internet only) |
 | GUI | Python + tkinter + Pillow, or the exe |
 

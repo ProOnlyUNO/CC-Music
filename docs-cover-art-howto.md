@@ -14,14 +14,30 @@ Copy that album folder (or just `cover.nfp`) onto the main CC computer under the
 
 ## Convert any PNG/JPG → cover.nfp (Windows)
 
-1. Open **CC Music Tools** → **Convert**, or from the repo desktop folder:
+### In the app (preferred)
+
+1. Open **CC Music Tools** → **Convert**.
+2. Scroll to **Album art → cover.nfp**.
+3. **Browse…** → pick a PNG/JPG (or several), an album folder, or a library root (`Artist/…`).
+4. Optional: check **Overwrite existing cover.nfp**.
+5. Click **Convert cover art**.
+
+Writes `Artist/Album/cover.nfp` next to the song files using the fixed pipeline: **96×96**, official CC palette, BOX resize (matches jukebox decode).
+
+### From a shell (optional)
 
 ```powershell
-cd C:\Users\Smoke\Downloads\CC-Music-repo\desktop
-python -c "from nfp_core import write_nfp; write_nfp(r'PATH\to\cover.png', r'PATH\to\Artist\Album\cover.nfp')"
+cd C:\Users\Smoke\Downloads\CC-Music\desktop
+python -c "from nfp_core import batch_write_cover_nfp; batch_write_cover_nfp([r'PATH\to\Artist\Album'], overwrite=True, log=print)"
 ```
 
-2. Keep `cover.nfp` beside the album’s `.dfpwm` files (`Artist/Album/cover.nfp`).
+Or a single image:
+
+```powershell
+python -c "from nfp_core import write_cover_nfp; write_cover_nfp(r'PATH\to\cover.png', overwrite=True)"
+```
+
+Keep `cover.nfp` beside the album’s `.dfpwm` files (`Artist/Album/cover.nfp`).
 
 ## Drop art in-game (Importer)
 

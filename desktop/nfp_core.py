@@ -266,5 +266,166 @@ def batch_convert_images(
     return out
 
 
+_MUSIC_EXTS = {
+    ".dfpwm",
+    ".mp3",
+    ".m4a",
+    ".wav",
+    ".flac",
+    ".ogg",
+    ".opus",
+    ".aac",
+    ".webm",
+    ".wma",
+}
+
+
+def find_album_cover_image(album_dir: Path | str) -> Path | None:
+    """Prefer cover/folder/album… names; else a single image sitting in the album folder."""
+    album_dir = Path(album_dir)
+    if not album_dir.is_dir():
+        return None
+    for name in COVER_NAMES:
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"):
+            cand = album_dir / f"{name}{ext}"
+            if cand.is_file():
+                return cand
+    imgs = sorted(
+        f
+        for f in album_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in IMAGE_EXTS and f.stem.lower() != "cover"
+    )
+    if len(imgs) == 1:
+        return imgs[0]
+    return None
+
+
+def _dir_has_music(path: Path) -> bool:
+    try:
+        return any(
+            f.is_file() and f.suffix.lower() in _MUSIC_EXTS for f in path.iterdir()
+        )
+    except OSError:
+        return False
+
+
+def _iter_album_dirs(root: Path) -> list[Path]:
+    """Collect album folders under a library root (Artist/Album or a single album)."""
+    root = Path(root)
+    if not root.is_dir():
+        return []
+    if _dir_has_music(root) or find_album_cover_image(root):
+        return [root]
+    albums: list[Path] = []
+    try:
+        children = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return []
+    for child in children:
+        if _dir_has_music(child) or find_album_cover_image(child):
+            albums.append(child)
+            continue
+        # Artist → Album nesting
+        try:
+            for album in sorted(p for p in child.iterdir() if p.is_dir()):
+                if _dir_has_music(album) or find_album_cover_image(album):
+                    albums.append(album)
+        except OSError:
+            continue
+    return albums
+
+
+def write_cover_nfp(
+    src_image: Path | str,
+    album_dir: Path | str | None = None,
+    *,
+    size: int = DEFAULT_NFP_SIZE,
+    overwrite: bool = False,
+) -> Path | None:
+    """Write ``cover.nfp`` beside song files (album folder). Returns path or None if skipped."""
+    src = Path(src_image)
+    dest_dir = Path(album_dir) if album_dir else src.parent
+    dst = dest_dir / "cover.nfp"
+    if dst.exists() and not overwrite:
+        return None
+    return write_nfp(src, dst, size=size)
+
+
+def batch_write_cover_nfp(
+    paths: Iterable[Path | str],
+    *,
+    size: int = DEFAULT_NFP_SIZE,
+    overwrite: bool = False,
+    log: LogFn | None = None,
+) -> dict:
+    """Convert PNG/JPG (or album / library folders) → ``cover.nfp`` next to Artist/Album songs.
+
+    - Image file → ``cover.nfp`` in that file's folder
+    - Album folder → find cover.png/jpg/… → ``cover.nfp`` there
+    - Library root (Artist/Album trees) → batch every album that has a cover image
+    """
+
+    def _log(msg: str) -> None:
+        if log:
+            log(msg)
+
+    done: list[Path] = []
+    skipped = 0
+    failed = 0
+    missing = 0
+    seen_dst: set[Path] = set()
+
+    for raw in paths:
+        p = Path(raw)
+        jobs: list[tuple[Path, Path]] = []  # (image, album_dir)
+
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTS:
+            jobs.append((p, p.parent))
+        elif p.is_dir():
+            for album in _iter_album_dirs(p):
+                img = find_album_cover_image(album)
+                if img is None:
+                    missing += 1
+                    _log(f"  skip (no cover image): {album}")
+                    continue
+                jobs.append((img, album))
+        else:
+            _log(f"  skip (not an image or folder): {p}")
+            continue
+
+        for img, album in jobs:
+            dst = (album / "cover.nfp").resolve()
+            if dst in seen_dst:
+                continue
+            seen_dst.add(dst)
+            if dst.exists() and not overwrite:
+                skipped += 1
+                _log(f"  exists, skipped: {dst}")
+                continue
+            try:
+                out = write_nfp(img, dst, size=size)
+                done.append(out)
+                try:
+                    shown = out.relative_to(Path.cwd())
+                except ValueError:
+                    shown = out
+                _log(f"  cover {shown}  ← {img.name}  ({size}×{size})")
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                _log(f"  FAILED  {img}: {e}")
+
+    _log(
+        f"Album art: wrote {len(done)}, skipped {skipped}, "
+        f"no image {missing}, failed {failed}."
+    )
+    return {
+        "done": len(done),
+        "skipped": skipped,
+        "missing": missing,
+        "failed": failed,
+        "paths": [str(p) for p in done],
+    }
+
+
 def is_image_name(name: str) -> bool:
     return Path(name).suffix.lower() in IMAGE_EXTS
