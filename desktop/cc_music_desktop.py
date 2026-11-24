@@ -6,7 +6,7 @@ Developer: ProOnlyUNO
 
 Tabs:
   Download  — YouTube search/URL or Genius album → select tracks → MP3 (yt-dlp)
-  Convert   — MP3/WAV/… → .dfpwm + PNG/JPG → cover.nfp (needs ffmpeg 5.1+ / Pillow)
+  Convert   — MP3/WAV/… → .dfpwm + PNG/JPG → cover.nfp; MP4 → .cvid + .dfpwm
   Lyrics    — LRCLIB public API → .lrc beside tracks + pack
   How to use / Commands
 """
@@ -29,6 +29,7 @@ import genius_core
 import lyrics_core
 import nfp_core
 import update_check
+import video_core
 
 APP_TITLE = "CC Music Tools"
 APP_VERSION = build_info.APP_VERSION
@@ -989,6 +990,62 @@ class App(tk.Tk):
             command=self._start_art_convert,
         ).pack(side="left")
 
+        # --- Music video → Song.cvid + Song.dfpwm ---
+        vid = ttk.LabelFrame(parent, text="Music video → .cvid + .dfpwm", padding=8)
+        vid.pack(fill="x", pady=(14, 0))
+        self.vid_input = tk.StringVar()
+        self.vid_out = tk.StringVar(value=str(DEFAULT_CONVERT_OUT))
+        self.vid_cells = tk.StringVar(
+            value=f"{video_core.DEFAULT_CELLS_W}x{video_core.DEFAULT_CELLS_H}"
+        )
+        self.vid_fps = tk.StringVar(value=str(video_core.DEFAULT_FPS))
+        self.vid_overwrite = tk.BooleanVar(value=False)
+        self.vid_dry = tk.BooleanVar(value=False)
+        self._path_row(vid, "MP4/MKV/… or folder", self.vid_input, self._pick_video_input)
+        self._path_row(vid, "Output (Artist/Album folder)", self.vid_out, lambda: self._pick_dir(self.vid_out))
+        opts_v = ttk.Frame(vid)
+        opts_v.pack(fill="x", pady=(4, 0))
+        ttk.Label(opts_v, text="Cells WxH:", width=12).pack(side="left")
+        ttk.Entry(opts_v, textvariable=self.vid_cells, width=10).pack(side="left", padx=(0, 12))
+        ttk.Label(opts_v, text="FPS:").pack(side="left")
+        ttk.Entry(opts_v, textvariable=self.vid_fps, width=6).pack(side="left", padx=(4, 12))
+        ttk.Checkbutton(opts_v, text="Overwrite", variable=self.vid_overwrite).pack(side="left")
+        ttk.Checkbutton(opts_v, text="Dry run", variable=self.vid_dry).pack(side="left", padx=(8, 0))
+        ttk.Label(
+            vid,
+            text=(
+                f"Offline encode for CC monitors (default {video_core.DEFAULT_CELLS_W}×"
+                f"{video_core.DEFAULT_CELLS_H} @ {video_core.DEFAULT_FPS} fps). Writes Song.cvid + "
+                "Song.dfpwm with the same stem — drop both via Importer beside the album. "
+                "Jukebox plays the song UI first, then switches this monitor to the video after ~3.5s."
+            ),
+            wraplength=740,
+            style="Dim.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
+        vid_actions = ttk.Frame(vid)
+        vid_actions.pack(fill="x", pady=(8, 0))
+        ttk.Button(
+            vid_actions,
+            text="Convert video pack",
+            style="Accent.TButton",
+            command=self._start_video_convert,
+        ).pack(side="left")
+
+    def _pick_video_input(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Select video file(s)",
+            filetypes=[
+                ("Video", "*.mp4 *.mkv *.webm *.mov *.avi *.m4v"),
+                ("All files", "*.*"),
+            ],
+        )
+        if paths:
+            self.vid_input.set("|".join(paths))
+            return
+        folder = filedialog.askdirectory(title="Or select a folder of videos")
+        if folder:
+            self.vid_input.set(folder)
+
     def _build_lyrics(self, parent: ttk.Frame) -> None:
         self.lyr_root = tk.StringVar()
         self.lyr_pack = tk.StringVar(value=str(DEFAULT_LYRICS_PACK))
@@ -1079,6 +1136,12 @@ Open setup/ next to this app (START_HERE.txt) for which .lua goes on which compu
    b2. Album art — on the same Convert tab, pick PNG/JPG or an Artist/Album
       (or library) folder → Convert cover art → writes cover.nfp (96×96)
       next to the songs. Batch-friendly; overwrite optional.
+   b3. Music video — Convert tab → pick MP4 → Convert video pack
+      → Song.cvid + Song.dfpwm (same stem). Put beside the song in
+      Artist/Album/. Jukebox shows the song UI ~3.5s, then switches that
+      monitor to the video (audio continuous). Right-click / SONG exits;
+      NEXT/BACK stay in video mode when the neighbour has a .cvid.
+      CLI: python tools/cvid_convert.py clip.mp4 -o out/Artist/Album
    c. Fetch lyrics — still available for libraries that need a re-scan
    d. Open output folder, copy Artist/Album trees into Minecraft
    e. In-game: run Importer → drag-drop onto the computer screen (not a monitor)
@@ -1794,6 +1857,58 @@ You’re set — enjoy the music.
                 if done and summary.get("paths"):
                     last = Path(summary["paths"][-1])
                     self.after(0, lambda: setattr(self, "_last_out", last.parent))
+            except Exception as e:  # noqa: BLE001
+                self._ui_log(f"ERROR: {e}")
+            finally:
+                self.after(0, lambda: self._set_busy(False))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _start_video_convert(self) -> None:
+        if self._busy:
+            messagebox.showwarning(APP_TITLE, "A job is already running.")
+            return
+        raw = self.vid_input.get().strip()
+        if not raw:
+            messagebox.showerror(APP_TITLE, "Pick an MP4/MKV (or folder) first.")
+            return
+        out = self.vid_out.get().strip()
+        if not out:
+            messagebox.showerror(APP_TITLE, "Pick an output Artist/Album folder.")
+            return
+        inputs = [p for p in raw.split("|") if p]
+        for p in inputs:
+            if not Path(p).exists():
+                messagebox.showerror(APP_TITLE, f"Path not found:\n{p}")
+                return
+        try:
+            w_s, h_s = self.vid_cells.get().strip().lower().split("x", 1)
+            cells_w, cells_h = int(w_s), int(h_s)
+            fps = float(self.vid_fps.get().strip() or video_core.DEFAULT_FPS)
+        except ValueError:
+            messagebox.showerror(APP_TITLE, "Cells must look like 64x18 and FPS must be a number.")
+            return
+
+        self._cancel = False
+        self._set_busy(True)
+        self._append_log("--- Music video → .cvid + .dfpwm ---")
+        self._last_out = Path(out)
+        self._ui_progress("video", 0.0, "Starting video convert…")
+
+        def work() -> None:
+            try:
+                video_core.run_video_convert(
+                    inputs,
+                    out,
+                    cells_w=cells_w,
+                    cells_h=cells_h,
+                    fps=fps,
+                    overwrite=self.vid_overwrite.get(),
+                    dry_run=self.vid_dry.get(),
+                    log=self._ui_log,
+                    progress=self._ui_progress,
+                    should_cancel=lambda: self._cancel,
+                )
             except Exception as e:  # noqa: BLE001
                 self._ui_log(f"ERROR: {e}")
             finally:

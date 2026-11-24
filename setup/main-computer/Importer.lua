@@ -1,10 +1,11 @@
 --[[
-  Importer.lua - drag & drop song + lyrics + art sorter for CC:Tweaked
+  Importer.lua - drag & drop song + lyrics + art + video sorter for CC:Tweaked
 
   Layout it maintains (same as the jukebox library expects):
       <disk label = artist>
           music/<Artist>/<Album>/<song>.dfpwm
           music/<Artist>/<Album>/<song>.lrc   (optional, beside audio)
+          music/<Artist>/<Album>/<song>.cvid  (optional music-video pack)
           music/<Artist>/<Album>/<song>.nfp   (optional pixel art, beside audio)
           music/<Artist>/<Album>/cover.nfp    (optional album art)
       Legacy flat music/<Artist - Album>/ is still recognized when matching.
@@ -13,7 +14,7 @@
       1. Run  Importer   (or  uploader  if saved under that name)
       2. Type the artist (autocompletes from your existing disk labels)
          and the album (blank = Singles)
-      3. Drag .dfpwm / .lrc / .nfp / .png / .jpg onto this computer's screen
+      3. Drag .dfpwm / .lrc / .cvid / .nfp / .png / .jpg onto this computer's screen
          (the computer GUI, not a monitor)
       4. Keep dropping; press N to switch artist/album, Q to quit
 
@@ -25,6 +26,9 @@
       session folder when a song of that name is there or was just
       imported in the same drop. Write beside that .dfpwm; optional
       /lyrics mirror with multi-disk spill. Clear match/miss prints.
+
+  .cvid: same basename match as .lrc — lands beside the matching .dfpwm so
+      jukebox can hand off the main monitor to the music video after ~3.5s.
 
   .nfp / .png / .jpg: place into matching Artist/Album.
       cover/album/folder/front/art names → album cover.* beside the album.
@@ -832,6 +836,32 @@ local function storeLrc(artist, album, fileName, data, batchPaths)
   return "ok", hit, beside, mirrored
 end
 
+-- Place .cvid beside matching .dfpwm (same basename rules as lyrics).
+local function storeCvid(artist, album, fileName, data, batchPaths)
+  local tracks = scanLibraryTracks()
+  local base = fileName:gsub("%.[Cc][Vv][Ii][Dd]$", "")
+  local hit = matchTrack(tracks, artist, album, base, nil, nil, batchPaths)
+  if not hit then
+    return "miss", nil, base
+  end
+  local cvidName = hit.base .. ".cvid"
+  local beside = fs.combine(fs.getDir(hit.path), cvidName)
+  if fs.exists(beside) and not fs.isDir(beside) and fileSize(beside) == #data then
+    return "duplicate", hit, beside
+  end
+  local need = #data + CONFIG.reserve
+  local m = mountOf(hit.path)
+  local mpath = m == "" and "/" or m
+  if freeSpace(mpath) < need then
+    return "full", hit, beside
+  end
+  local ok, err = writeBytes(beside, data)
+  if not ok then
+    return "error", hit, tostring(err)
+  end
+  return "ok", hit, beside
+end
+
 local function promptArtDestination(defaultArtist, defaultAlbum)
   say("No matching Artist/Album for this art. Enter where to put it.", colours.yellow)
   write("Artist: ")
@@ -960,9 +990,10 @@ local function handleDrop(files, artist, album)
     return
   end
 
-  -- Pass 1: .dfpwm (so same-drop .lrc/.nfp can land beside them)
+  -- Pass 1: .dfpwm (so same-drop .lrc/.cvid/.nfp can land beside them)
   local batchAudio = {} -- { base, path, name }
   local pendingLrc = {}
+  local pendingCvid = {}
   local pendingArt = {}
 
   for _, f in ipairs(list) do
@@ -1013,6 +1044,14 @@ local function handleDrop(files, artist, album)
       else
         pendingLrc[#pendingLrc + 1] = { name = name, data = data }
       end
+    elseif lower:match("%.cvid$") then
+      local okRead, data = pcall(f.readAll)
+      if f.close then pcall(f.close) end
+      if not okRead or not data or #data == 0 then
+        say(name .. ": could not read .cvid, skipped", colours.red)
+      else
+        pendingCvid[#pendingCvid + 1] = { name = name, data = data }
+      end
     elseif isArtFile(name) then
       local okRead, data = pcall(f.readAll)
       if f.close then pcall(f.close) end
@@ -1022,7 +1061,7 @@ local function handleDrop(files, artist, album)
         pendingArt[#pendingArt + 1] = { name = name, data = data }
       end
     else
-      say(name .. ": not .dfpwm / .lrc / .nfp / .png / .jpg, skipped", colours.orange)
+      say(name .. ": not .dfpwm / .lrc / .cvid / .nfp / .png / .jpg, skipped", colours.orange)
       if f.close then pcall(f.close) end
     end
   end
@@ -1051,7 +1090,24 @@ local function handleDrop(files, artist, album)
     end
   end
 
-  -- Pass 3: .nfp / .png / .jpg into matching Artist/Album (or prompt)
+  -- Pass 3: .cvid beside matching .dfpwm
+  for _, item in ipairs(pendingCvid) do
+    local status, hit, detail = storeCvid(artist, album, item.name, item.data, batchAudio)
+    if status == "ok" then
+      say(string.format("CVID: %s -> %s", item.name, detail), colours.lime)
+    elseif status == "duplicate" then
+      say(string.format("CVID already beside track: %s (%s)", detail, item.name), colours.lightGrey)
+    elseif status == "miss" then
+      say(string.format("CVID miss: %s (no .dfpwm for \"%s\")", item.name, tostring(detail)), colours.orange)
+      say("  Tip: import the song first, or drop Song.dfpwm + Song.cvid together.", colours.lightGrey)
+    elseif status == "full" then
+      say(string.format("CVID matched %s but disk full for %s", hit and hit.base or "?", detail), colours.red)
+    else
+      say(string.format("CVID error: %s — %s", item.name, tostring(detail)), colours.red)
+    end
+  end
+
+  -- Pass 4: .nfp / .png / .jpg into matching Artist/Album (or prompt)
   for _, item in ipairs(pendingArt) do
     local status, hit, detail = storeArt(artist, album, item.name, item.data, batchAudio)
     local kind = (artExt(item.name) or ""):upper():gsub("%.", "")
@@ -1102,7 +1158,7 @@ while true do
 
   print()
   say("Folder: music/" .. folderFor(artist, album), colours.cyan)
-  say("Drop .dfpwm / .lrc / .nfp / .png / .jpg onto this screen now.", colours.white)
+  say("Drop .dfpwm / .lrc / .cvid / .nfp / .png / .jpg onto this screen now.", colours.white)
   say("N = new artist/album   Q = quit\n", colours.lightGrey)
 
   local quit = false
