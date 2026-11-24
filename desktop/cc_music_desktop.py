@@ -1886,7 +1886,7 @@ You’re set — enjoy the music.
             cells_w, cells_h = int(w_s), int(h_s)
             fps = float(self.vid_fps.get().strip() or video_core.DEFAULT_FPS)
         except ValueError:
-            messagebox.showerror(APP_TITLE, "Cells must look like 64x18 and FPS must be a number.")
+            messagebox.showerror(APP_TITLE, "Cells must look like 128x36 and FPS must be a number.")
             return
 
         self._cancel = False
