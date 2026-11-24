@@ -39,8 +39,8 @@ NFP_CHARS = "0123456789abcdef"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 # Default cover resolution for jukebox thumbs. Aurora UI resamples into
 # slot sizes (Art.buildCells), so native .nfp size is not 1:1 on screen.
-# Keep in sync with jukebox.lua decodeNfp NFP_MAX (raise both together for 256).
-DEFAULT_NFP_SIZE = 128
+# Keep in sync with jukebox.lua decodeNfp NFP_MAX.
+DEFAULT_NFP_SIZE = 256
 COVER_NAMES = {
     "cover",
     "folder",

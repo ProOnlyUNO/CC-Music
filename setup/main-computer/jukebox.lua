@@ -2763,7 +2763,7 @@ function Art.trackImage(track)
 end
 
 -- Build a per-cell art object (3 bytes per cell: fg, bg, mask).
--- Samples from img.w × img.h so higher-res .nfp covers (32+/48+/128) scale into
+-- Samples from img.w × img.h so higher-res .nfp covers (48+/128+/256) scale into
 -- whatever UI slot size is requested without 1:1 overflow.
 function Art.buildCells(img, cw, ch)
   cw, ch = math.max(1, math.floor(cw)), math.max(1, math.floor(ch))
@@ -10051,8 +10051,8 @@ local function decodeNfp(path, pal)
   end
   if w < 1 or h < 1 then return nil, "empty nfp" end
   -- Keep native .nfp resolution. Art.buildCells scales into the UI slot.
-  -- NFP_MAX must match desktop/nfp_core.py DEFAULT_NFP_SIZE (bump both for 256).
-  local NFP_MAX = 128
+  -- NFP_MAX must match desktop/nfp_core.py DEFAULT_NFP_SIZE.
+  local NFP_MAX = 256
   local side = math.max(w, h)
   if side > NFP_MAX then side = NFP_MAX end
   local pix = {}
