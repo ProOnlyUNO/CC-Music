@@ -4855,9 +4855,64 @@ UI.loginFailures = 0
 UI.loginBlockedUntil = 0
 UI.navLabels = { home = "HOME", music = "MUSIC", library = "LIBRARY", search = "SEARCH", playlists = "LISTS", lyrics = "LYRICS" }
 
+-- Floppy used/free meter (title bar on every screen). Same logic as pre-Aurora
+-- three-panel jukebox: unique disk/diskN mounts, 4s refresh, non-blocking.
+UI.diskSpaceInterval = 4
+UI.diskSpace = { free = 0, used = 0, drives = 0, label = "", short = "", lastCheck = 0 }
+
 function UI.request(force)
   UI.dirty = true
   if force then UI.force = true end
+end
+
+function UI.refreshDiskSpace(force)
+  local t = Util.now()
+  local ds = UI.diskSpace
+  if not force and ds.lastCheck > 0 and (t - ds.lastCheck) < UI.diskSpaceInterval then
+    return false
+  end
+  ds.lastCheck = t
+
+  local seen, totalFree, totalUsed, nDrives = {}, 0, 0, 0
+
+  local function consider(mount)
+    if not mount or seen[mount] or not fs.exists(mount) then return end
+    -- Only floppy mounts (disk / disk2 / …), not the computer HDD or ROM
+    if not mount:match("^disk%d*$") then return end
+    seen[mount] = true
+
+    local okFree, free = pcall(fs.getFreeSpace, mount)
+    if not okFree or type(free) ~= "number" then return end
+    local okCap, cap = pcall(fs.getCapacity, mount)
+    local used = (okCap and type(cap) == "number") and math.max(0, cap - free) or 0
+
+    totalFree = totalFree + free
+    totalUsed = totalUsed + used
+    nDrives = nDrives + 1
+  end
+
+  local roots = (App.cfg and App.cfg.roots) or Config.defaultRoots or {}
+  for _, root in ipairs(roots) do
+    local mount = tostring(root):match("^(disk%d*)")
+    if mount then consider(mount) end
+  end
+
+  ds.free = totalFree
+  ds.used = totalUsed
+  ds.drives = nDrives
+  if nDrives == 0 then
+    ds.label = "no disks"
+    ds.short = "no disks"
+  else
+    -- Label matches pre-Aurora three-panel meter (ASCII "-" survives Util.clean).
+    ds.label = string.format("%s used - %s free", Util.fmtSize(totalUsed), Util.fmtSize(totalFree))
+    ds.short = string.format("%s/%s", Util.fmtSize(totalUsed), Util.fmtSize(totalFree))
+    if nDrives > 1 then
+      ds.label = ds.label .. string.format(" (%d disks)", nDrives)
+      ds.short = ds.short .. string.format(" (%d)", nDrives)
+    end
+  end
+  return true
 end
 
 function UI.toast(message, kind)
@@ -4939,6 +4994,18 @@ function UI.drawTopBar(m, opts)
   local minimize = opts.minimize
   local home = opts.home
 
+  UI.refreshDiskSpace(false)
+  local spaceFull = (UI.diskSpace and UI.diskSpace.label) or ""
+  local spaceShort = (UI.diskSpace and UI.diskSpace.short) or spaceFull
+  local function spaceToast()
+    local ds = UI.diskSpace
+    if not ds or ds.drives == 0 then
+      UI.toast("No floppy disks attached", "warning")
+    else
+      UI.toast(ds.label, "info")
+    end
+  end
+
   if m.compact then
     local settingsFn = opts.settings or function() UI.openSettings() end
     local left = m.pad
@@ -4960,6 +5027,12 @@ function UI.drawTopBar(m, opts)
     end
     titleX = left + 1
     local recentX = rightX - (minimize and 11 or 7)
+    local spaceShown = ""
+    if spaceShort ~= "" and recentX - titleX > #spaceShort + 2 then
+      spaceShown = spaceShort
+      Canvas:textRight(titleX, 1, recentX - titleX - 1, spaceShown, Theme.C.dim, Theme.C.surface)
+      UI.hit(math.max(titleX, recentX - #spaceShown - 1), 1, #spaceShown + 1, 2, spaceToast)
+    end
     Canvas:roundRect(recentX, 1, 4, 2, 1, Theme.C.surface2, Theme.C.surface)
     Canvas:icon("grid", recentX, 1, 4, 2, Theme.C.muted, 1)
     UI.hit(recentX, 1, 4, 2, Apps.switcher)
@@ -4977,7 +5050,7 @@ function UI.drawTopBar(m, opts)
       Canvas:icon("settings5", rightX, 1, 4, 2, Auth.isRoot() and Theme.C.accent or Theme.C.muted, 1)
       UI.hit(rightX, 1, 4, 2, settingsFn)
     end
-    if opts.title and opts.title ~= "" then
+    if opts.title and opts.title ~= "" and spaceShown == "" then
       Canvas:textFit(titleX, 1, math.max(3, rightX - (minimize and 5 or 0) - titleX - 8), opts.title, Theme.C.muted, Theme.C.surface)
     end
     return
@@ -5004,14 +5077,36 @@ function UI.drawTopBar(m, opts)
   titleX = left
 
   local mx = minimize and (rightX - 6) or nil
-  local tw = math.max(4, rightX - (minimize and 6 or 0) - titleX - 8)
+  -- Speaker status (informational), left of minimize/settings
+  local live = Audio.liveCount()
+  local spX = (minimize and (mx - 7) or (rightX - 7))
+
+  -- Disk used/free, left of speaker (prefer full label; fall back to short)
+  local spaceLabel = ""
+  local spaceGap = 0
+  if spaceFull ~= "" then
+    local avail = math.max(0, spX - titleX - 2)
+    if avail >= #spaceFull then
+      spaceLabel = spaceFull
+    elseif avail >= #spaceShort and spaceShort ~= "" then
+      spaceLabel = spaceShort
+    elseif avail >= 8 then
+      spaceLabel = Util.fit(spaceShort ~= "" and spaceShort or spaceFull, avail)
+    end
+    if spaceLabel ~= "" then spaceGap = #spaceLabel + 2 end
+  end
+
+  local tw = math.max(4, spX - titleX - 1 - spaceGap)
   if opts.title and opts.title ~= "" then
     Canvas:textFit(titleX, 2, tw, opts.title, Theme.C.muted, Theme.C.surface)
   end
 
-  -- Speaker status (informational)
-  local live = Audio.liveCount()
-  local spX = (minimize and (mx - 7) or (rightX - 7))
+  if spaceLabel ~= "" then
+    local sx = spX - #spaceLabel - 1
+    Canvas:text(sx, 2, spaceLabel, Theme.C.dim, Theme.C.surface)
+    UI.hit(sx, 1, #spaceLabel, top, spaceToast)
+  end
+
   local col = live > 0 and Theme.C.accent or Theme.C.warning
   Canvas:pdisc((spX - 1) * 2 + 1, 1, 2, 2, col)
   Canvas:text(spX + 1, 2, tostring(live), live > 0 and Theme.C.muted or Theme.C.warning, Theme.C.surface)
@@ -5320,6 +5415,11 @@ function UI.update(dt)
   if Player.cur and not Player.paused then UI.request() end
   if App.screen == "home" and now >= (UI.nextClock or 0) then
     UI.nextClock = now + 30
+    UI.request()
+  end
+  -- Refresh disk used/free every diskSpaceInterval (non-blocking; redraw if changed)
+  local prevSpace = UI.diskSpace and UI.diskSpace.label or ""
+  if UI.refreshDiskSpace(false) and UI.diskSpace.label ~= prevSpace then
     UI.request()
   end
   if Auth.root and App.screen:match("^settings") then
@@ -9671,7 +9771,11 @@ function App.handleEvent(ev, p1, p2, p3)
     local ok, t = pcall(peripheral.getType, p1)
     if ok then typ = t end
     if typ == "monitor" or p1 == App.monName then App.reinitDisplay() end
+    if typ == "drive" then UI.refreshDiskSpace(true) end
     UI.toast("Peripherals changed · " .. Audio.liveCount() .. " speakers", "info")
+  elseif ev == "disk" or ev == "disk_eject" then
+    UI.refreshDiskSpace(true)
+    UI.request(true)
   elseif ev == "speaker_audio_empty" then
     Audio.pump(2)
   elseif ev == "terminate" then
@@ -10103,6 +10207,7 @@ local function run(argv)
   Audio.init()
   Player.init()
   App.loadSearchHistory()
+  UI.refreshDiskSpace(true)
 
   UI.force = true
   UI.dirty = true

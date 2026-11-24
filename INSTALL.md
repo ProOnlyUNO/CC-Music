@@ -125,7 +125,7 @@ shell.run("jukebox")
 
 Controls on the monitor: tap Artist → Album → Song. Bottom strip has play/pause, skip, shuffle, repeat, seek, volume. `F5` rescans disks. `Q` quits.
 
-**Disk space:** the title bar shows total **used · free** across attached `disk` / `diskN` mounts (e.g. `1.2 MB used · 384 KB free (3 disks)`), refreshed every **4 seconds** without pausing playback.
+**Disk space:** the title bar on every screen (HOME / LIBRARY / etc.) shows total **used - free** across attached `disk` / `diskN` mounts (e.g. `1.2 MB used - 384 KB free (3 disks)`), refreshed every **4 seconds** without pausing playback.
 
 **Color UI:** now-playing strip uses a **cycling rainbow** on artist/album/title text; Artist / Album / Song rows are **tinted by first letter** (A–Z across the CC palette). Selected / playing rows stay high-contrast. Replace `jukebox.lua` and restart to pick UI updates up — `F5` does not reload the program.
 
