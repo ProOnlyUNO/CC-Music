@@ -15,6 +15,37 @@ local function listDir(path)
   return {}
 end
 
+local function listFloppyMounts()
+  local mounts, seen = {}, {}
+  local function add(m)
+    if not m or m == "" then return end
+    m = tostring(m):gsub("^/", "")
+    if seen[m] or not m:match("^disk%d*$") then return end
+    local ok, isDir = pcall(fs.isDir, m)
+    if ok and isDir then
+      seen[m] = true
+      mounts[#mounts + 1] = m
+    end
+  end
+  local lok, entries = pcall(fs.list, "")
+  if lok and type(entries) == "table" then
+    for _, name in ipairs(entries) do
+      if type(name) == "string" and name:match("^disk%d*$") then add(name) end
+    end
+  end
+  local pok, names = pcall(peripheral.getNames)
+  if pok and type(names) == "table" then
+    for _, pname in ipairs(names) do
+      local tok, typ = pcall(peripheral.getType, pname)
+      if tok and typ == "drive" then
+        local mok, mount = pcall(disk.getMountPath, pname)
+        if mok and mount then add(mount) end
+      end
+    end
+  end
+  return mounts
+end
+
 local function uniqueLibraryRoots()
   local out, seen = {}, {}
   local function add(r)
@@ -25,12 +56,7 @@ local function uniqueLibraryRoots()
     end
   end
   add("music")
-  if fs.exists("disk") and fs.isDir("disk") then add("disk") end
-  if fs.exists("disk1") and fs.isDir("disk1") then add("disk1") end
-  for i = 2, 50 do
-    local m = "disk" .. i
-    if fs.exists(m) and fs.isDir(m) then add(m) end
-  end
+  for _, m in ipairs(listFloppyMounts()) do add(m) end
   return out
 end
 
