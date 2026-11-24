@@ -6,8 +6,8 @@ Usage:
   python tools/cvid_convert.py folder_of_videos -o dfpwm_out --fps 8 --cells 256x72
 
 Defaults: 256×72 @ 8 fps for a 9×3 Advanced Monitor @ scale 0.5 (~270×60 wall).
-Packs over ~20 MiB auto-split into Song.cvid.1/.2/.3. Single-file fallback:
---cells 160x45 (fits ~3 min under 20 MiB without parts).
+Packs over ~18 MiB auto-split into Song.cvid.1/.2/.3. Single-file fallback:
+--cells 160x45 (fits ~2.5–3 min under 18 MiB without parts).
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ def main() -> int:
         "--max-part-mb",
         type=float,
         default=video_core.MAX_PART_BYTES / 1048576,
-        help="Max MiB per .cvid / .cvid.N file (default 20; 0 = no split)",
+        help="Max MiB per .cvid / .cvid.N file (default 18; 0 = no split)",
     )
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--skip-audio", action="store_true", help="Only write .cvid")
