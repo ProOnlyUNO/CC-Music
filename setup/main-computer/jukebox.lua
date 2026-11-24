@@ -551,6 +551,10 @@ Config.accentSlot = {
   violet = 10, lime = 13, ice = 5, coral = 12,
 }
 
+-- Match pre-Aurora jukebox.lua (CONFIG.maxVolume = 3.0).
+-- speaker.playAudio volume 0..3 controls hear distance as well as loudness.
+Config.MAX_VOLUME = 3.0
+
 Config.defaults = {
   version = 1,
   accent = "violet",
@@ -558,7 +562,8 @@ Config.defaults = {
   monitorScale = 0.5,
   animations = true,
   visualizer = "bars",
-  volume = 0.75,
+  -- CC:Tweaked speaker.playAudio accepts 0..3; higher values travel farther.
+  volume = 1.0,
   muted = false,
   shuffle = false,
   repeatMode = "off",
@@ -644,7 +649,7 @@ local function validate(c)
   if c.visualizer ~= "bars" and c.visualizer ~= "wave" and c.visualizer ~= "vu" and c.visualizer ~= "off" then
     c.visualizer = "bars"
   end
-  c.volume = Util.clamp(c.volume, 0, 1)
+  c.volume = Util.clamp(c.volume, 0, Config.MAX_VOLUME)
   c.muted = c.muted == true
   c.shuffle = c.shuffle == true
   if c.repeatMode == nil and type(c["repeat"]) == "string" then c.repeatMode = c["repeat"] end
@@ -710,7 +715,7 @@ function Config.load()
     -- Import the old jukebox settings once, without deleting anything.
     local old = readOld(".jukebox_settings")
     if old then
-      cfg.volume = Util.clamp(tonumber(old.volume) or cfg.volume, 0, 1)
+      cfg.volume = Util.clamp(tonumber(old.volume) or cfg.volume, 0, Config.MAX_VOLUME)
       cfg.muted = old.muted == true
       cfg.shuffle = old.shuffle == true
       if old.rep == "all" or old.rep == "one" or old.rep == "off" then cfg.repeatMode = old.rep end
@@ -3456,7 +3461,9 @@ Audio.loaded = false
 Audio.reason = ""
 Audio.lastTick = 0
 Audio.lastPump = 0
-Audio.volume = 0.75
+-- speaker.playAudio volume 0..3 (Config.MAX_VOLUME); higher travels farther.
+Audio.MAX_VOLUME = (Config and Config.MAX_VOLUME) or 3.0
+Audio.volume = 1.0
 Audio.muted = false
 Audio.viz = {
   bands = { 0, 0, 0, 0, 0, 0, 0, 0 },
@@ -3480,7 +3487,8 @@ function Audio.init()
   for _, f in ipairs(Audio.bandFreqs) do
     Audio.bandCoef[#Audio.bandCoef + 1] = 2 * math.cos(2 * math.pi * f / Audio.SR)
   end
-  Audio.volume = App.cfg and App.cfg.volume or 0.75
+  Audio.MAX_VOLUME = (Config and Config.MAX_VOLUME) or Audio.MAX_VOLUME or 3.0
+  Audio.volume = App.cfg and App.cfg.volume or 1.0
   Audio.muted = App.cfg and App.cfg.muted or false
   Audio.scan()
   Audio.lastTick = Util.now()
@@ -3557,7 +3565,15 @@ function Audio.stopSpeakers()
 end
 
 function Audio.effectiveVolume()
-  return Audio.muted and 0 or Util.clamp(Audio.volume, 0, 1)
+  return Audio.muted and 0 or Util.clamp(Audio.volume, 0, Audio.MAX_VOLUME)
+end
+
+function Audio.volumeFrac()
+  return Util.clamp(Audio.volume / Audio.MAX_VOLUME, 0, 1)
+end
+
+function Audio.volumeLabel()
+  return string.format("%d%%", math.floor(Audio.volume * 100 + 0.5))
 end
 
 function Audio.closeStream()
@@ -3673,13 +3689,22 @@ function Audio.position()
 end
 
 function Audio.setVolume(v)
-  Audio.volume = Util.clamp(tonumber(v) or Audio.volume, 0, 1)
+  local prev = Audio.volume
+  Audio.volume = Util.clamp(tonumber(v) or Audio.volume, 0, Audio.MAX_VOLUME)
   if App.cfg then App.cfg.volume = Audio.volume; Config.saveSoon() end
+  -- Instant volume (pre-Aurora): re-pump so buffered speaker audio picks up the new level.
+  if Audio.track and not Audio.paused and Audio.volume ~= prev then
+    Audio.resync()
+  end
 end
 
 function Audio.setMuted(m)
+  local prev = Audio.muted
   Audio.muted = m and true or false
   if App.cfg then App.cfg.muted = Audio.muted; Config.saveSoon() end
+  if Audio.track and not Audio.paused and Audio.muted ~= prev then
+    Audio.resync()
+  end
 end
 
 function Audio.toggleMute()
@@ -3797,7 +3822,9 @@ function Audio.pump(maxPushes)
     local vol = Audio.effectiveVolume()
     for _, sp in ipairs(Audio.speakers) do
       if not sp.dead and sp.enabled and not Audio.accepted[sp.name] then
-        local ok, accepted = pcall(sp.dev.playAudio, Audio.pending, vol * sp.gain)
+        -- Broadcast same PCM chunk to every enabled speaker (wired + adjacent).
+        local level = Util.clamp(vol * (sp.gain or 1), 0, Audio.MAX_VOLUME)
+        local ok, accepted = pcall(sp.dev.playAudio, Audio.pending, level)
         if not ok then
           sp.dead = true
           if UI and UI.toast then UI.toast("Speaker disconnected: " .. sp.name, "danger") end
@@ -5716,14 +5743,14 @@ function UI.drawModal()
     Canvas:textFit(x + 2, y + 1, pw - 4, "VOLUME", Theme.C.text, Theme.C.surface2)
     Canvas:icon("volume9", x + 2, y + 3, 6, 3, Theme.C.accent, 1)
     local barX, barW = x + 8, pw - 12
-    UI.progressBar(barX, y + 3, barW, 2, Audio.volume, {
+    UI.progressBar(barX, y + 3, barW, 2, Audio.volumeFrac(), {
       fn = function(f)
-        Audio.setVolume(f)
+        Audio.setVolume(f * Audio.MAX_VOLUME)
         Player.syncPaused()
         UI.request(true)
       end,
     })
-    Canvas:textFit(barX, y + 5, barW, string.format("%d%%", math.floor(Audio.volume * 100 + 0.5)), Theme.C.muted, Theme.C.surface2)
+    Canvas:textFit(barX, y + 5, barW, Audio.volumeLabel(), Theme.C.muted, Theme.C.surface2)
     local bw = math.floor((pw - 8) / 3)
     UI.button(x + 2, y + 7, bw, 3, Audio.muted and "MUTE" or "MUTE", {
       variant = Audio.muted and "active" or "surface",
@@ -6180,7 +6207,7 @@ function Screens.quickActions()
     { label = "Play / Pause", sub = Player.paused and "Resume playback" or "Pause playback", icon = Player.paused and "play" or "pause", value = "pause" },
     { label = "Lyrics", icon = "lyrics", value = "lyrics" },
     { label = "Queue", icon = "queue9", value = "queue" },
-    { label = "Volume", sub = string.format("%d%%", math.floor(Audio.volume * 100 + 0.5)), icon = "volume9", value = "volume" },
+    { label = "Volume", sub = Audio.volumeLabel(), icon = "volume9", value = "volume" },
     { label = Player.shuffle and "Shuffle: on" or "Shuffle: off", icon = "shuffle9", value = "shuffle" },
     { label = "Repeat: " .. Player.repeatMode:upper(), icon = "repeat", value = "repeat" },
     { label = "Go to album", icon = "disc", value = "album" },
@@ -7606,9 +7633,9 @@ function Screens.settingsAudio()
   entries[#entries + 1] = { h = 7, draw = function(ax, ay, aw)
     Canvas:roundRect(ax, ay, aw, 7, 1, Theme.C.surface, Theme.C.bg)
     Canvas:textFit(ax + 2, ay + 1, aw - 4, "MASTER VOLUME", Theme.C.dim, Theme.C.surface)
-    Canvas:textRight(ax + 2, ay + 1, aw - 4, string.format("%d%%", math.floor(Audio.volume * 100 + 0.5)), Theme.C.accent, Theme.C.surface)
-    UI.progressBar(ax + 2, ay + 3, aw - 4, 2, Audio.volume, {
-      fn = function(f) Audio.setVolume(f); UI.request(true) end,
+    Canvas:textRight(ax + 2, ay + 1, aw - 4, Audio.volumeLabel(), Theme.C.accent, Theme.C.surface)
+    UI.progressBar(ax + 2, ay + 3, aw - 4, 2, Audio.volumeFrac(), {
+      fn = function(f) Audio.setVolume(f * Audio.MAX_VOLUME); UI.request(true) end,
     })
     UI.button(ax + 2, ay + 5, math.min(12, aw - 4), 2, Audio.muted and "UNMUTE" or "MUTE", {
       variant = Audio.muted and "active" or "surface2", icon = "volume9",
