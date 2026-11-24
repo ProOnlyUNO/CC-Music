@@ -2763,7 +2763,7 @@ function Art.trackImage(track)
 end
 
 -- Build a per-cell art object (3 bytes per cell: fg, bg, mask).
--- Samples from img.w × img.h so higher-res .nfp covers (48+/128+/256) scale into
+-- Samples from img.w × img.h so .nfp/BMP covers (decoded to IMG×IMG) scale into
 -- whatever UI slot size is requested without 1:1 overflow.
 function Art.buildCells(img, cw, ch)
   cw, ch = math.max(1, math.floor(cw)), math.max(1, math.floor(ch))
@@ -10040,39 +10040,68 @@ function Art.isImageFile(name)
   return _isImage(name)
 end
 
+-- Official CC:Tweaked default palette (sRGB), matching desktop nfp_core.CC_PALETTE.
+-- .nfp hex digits index THIS palette, not Theme.rgb (which is remapped for UI).
+local NFP_CC_RGB = {
+  [0] = 0xF0F0F0, [1] = 0xF2B233, [2] = 0xE57FD8, [3] = 0x99B2F2,
+  [4] = 0xDEDE6C, [5] = 0x7FCC19, [6] = 0xF2B2CC, [7] = 0x4C4C4C,
+  [8] = 0x999999, [9] = 0x4C99B2, [10] = 0xB266E5, [11] = 0x3366CC,
+  [12] = 0x7F664C, [13] = 0x57A64E, [14] = 0xCC4C4C, [15] = 0x111111,
+}
+
 local function decodeNfp(path, pal)
-  if not paintutils or not paintutils.loadImage then return nil, "no paintutils" end
-  local ok, img = pcall(paintutils.loadImage, path)
-  if not ok or type(img) ~= "table" then return nil, "bad nfp" end
-  local h, w = #img, 0
-  for y = 1, h do
-    local row = img[y]
-    if type(row) == "table" and #row > w then w = #row end
-  end
-  if w < 1 or h < 1 then return nil, "empty nfp" end
-  -- Keep native .nfp resolution. Art.buildCells scales into the UI slot.
-  -- NFP_MAX must match desktop/nfp_core.py DEFAULT_NFP_SIZE.
-  local NFP_MAX = 256
-  local side = math.max(w, h)
-  if side > NFP_MAX then side = NFP_MAX end
-  local pix = {}
-  local function nearest(col)
-    if type(col) ~= "number" or col == 0 then return 15 end
-    -- CC colour constants are powers of two; map bit index 0..15
-    local bit = 0
-    local v = col
-    while v > 1 and bit < 15 do v = math.floor(v / 2); bit = bit + 1 end
-    return bit
-  end
-  for ty = 0, side - 1 do
-    local sy = math.floor(ty * h / side) + 1
-    local row = img[sy] or {}
-    for tx = 0, side - 1 do
-      local sx = math.floor(tx * w / side) + 1
-      pix[#pix + 1] = string.char(nearest(row[sx]))
+  pal = pal or Theme.artPalette()
+  -- Parse .nfp as text (CRLF-safe). Avoid paintutils.loadImage tables for large covers.
+  local okOpen, fh = pcall(fs.open, path, "r")
+  if not okOpen or not fh then return nil, "missing nfp" end
+  local rows, w, h = {}, 0, 0
+  while true do
+    local line = fh.readLine()
+    if line == nil then break end
+    line = tostring(line):gsub("\r", "")
+    local row = {}
+    for i = 1, #line do
+      local n = tonumber(line:sub(i, i), 16)
+      if n then row[#row + 1] = n end
+    end
+    if #row > 0 then
+      h = h + 1
+      rows[h] = row
+      if #row > w then w = #row end
     end
   end
-  return { w = side, h = side, pix = table.concat(pix), source = "nfp", path = path }
+  pcall(function() fh.close() end)
+  if w < 1 or h < 1 then return nil, "empty nfp" end
+
+  -- Decode into the same IMG×IMG buffer as BMP/PPM so Art.buildCells stays sharp.
+  local outSide = IMG
+  local pix = {}
+  local counts = {}
+  for ty = 0, outSide - 1 do
+    local y0 = math.floor(ty * h / outSide)
+    local y1 = math.max(y0 + 1, math.floor((ty + 1) * h / outSide))
+    for tx = 0, outSide - 1 do
+      local x0 = math.floor(tx * w / outSide)
+      local x1 = math.max(x0 + 1, math.floor((tx + 1) * w / outSide))
+      local best, bestN = 15, -1
+      for sy = y0, y1 - 1 do
+        local row = rows[sy + 1] or {}
+        for sx = x0, x1 - 1 do
+          local ccIdx = row[sx + 1]
+          if ccIdx == nil then ccIdx = 15 end
+          local r, g, b = Util.rgbParts(NFP_CC_RGB[ccIdx] or 0x111111)
+          -- Remap intended CC colour into the live Theme.artPalette indices.
+          local ti = nearestColor(r, g, b, pal)
+          local n = (counts[ti] or 0) + 1
+          counts[ti] = n
+          if n > bestN then bestN = n; best = ti end
+        end
+      end
+      pix[#pix + 1] = string.char(best)
+      for k in pairs(counts) do counts[k] = nil end
+    end
+  end
+  return { w = outSide, h = outSide, pix = table.concat(pix), source = "nfp", path = path }
 end
 
 local _loadImage = Art.loadImage

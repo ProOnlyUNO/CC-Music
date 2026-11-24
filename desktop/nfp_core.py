@@ -37,10 +37,10 @@ CC_PALETTE: list[tuple[int, int, int]] = [
 
 NFP_CHARS = "0123456789abcdef"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
-# Default cover resolution for jukebox thumbs. Aurora UI resamples into
-# slot sizes (Art.buildCells), so native .nfp size is not 1:1 on screen.
-# Keep in sync with jukebox.lua decodeNfp NFP_MAX.
-DEFAULT_NFP_SIZE = 256
+# Default cover resolution for jukebox thumbs. Matches jukebox.lua IMG (96):
+# decodeNfp box-filters any .nfp into IMG×IMG and remaps CC palette → Theme.
+# Larger files still load; 96 is the sharpest practical encode size for CC art.
+DEFAULT_NFP_SIZE = 96
 COVER_NAMES = {
     "cover",
     "folder",
@@ -82,7 +82,9 @@ def image_to_nfp_lines(
     # Flatten onto dark bg so translucent covers stay readable on CC monitors.
     bg = Image.new("RGBA", img.size, (17, 17, 17, 255))
     flat = Image.alpha_composite(bg, img).convert("RGB")
-    flat = flat.resize((max(1, size), max(1, size)), Image.Resampling.LANCZOS)
+    # BOX averages source blocks before quantize — cleaner than LANCZOS speckles
+    # when the destination is a tiny 16-colour CC grid.
+    flat = flat.resize((max(1, size), max(1, size)), Image.Resampling.BOX)
 
     rows: list[str] = []
     px = flat.load()
