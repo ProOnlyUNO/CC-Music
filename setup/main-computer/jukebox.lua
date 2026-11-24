@@ -3738,9 +3738,9 @@ function Audio.setVolume(v)
   local prev = Audio.volume
   Audio.volume = Util.clamp(tonumber(v) or Audio.volume, 0, Audio.MAX_VOLUME)
   if App.cfg then App.cfg.volume = Audio.volume; Config.saveSoon() end
-  -- Instant volume (pre-Aurora): re-pump so buffered speaker audio picks up the new level.
+  -- Instant volume: re-pump at the new level without reopening/seeking the stream.
   if Audio.track and not Audio.paused and Audio.volume ~= prev then
-    Audio.resync()
+    Audio.relevel()
   end
 end
 
@@ -3749,7 +3749,7 @@ function Audio.setMuted(m)
   Audio.muted = m and true or false
   if App.cfg then App.cfg.muted = Audio.muted; Config.saveSoon() end
   if Audio.track and not Audio.paused and Audio.muted ~= prev then
-    Audio.resync()
+    Audio.relevel()
   end
 end
 
@@ -3895,9 +3895,11 @@ function Audio.pump(maxPushes)
       Audio.pending = nil
       Audio.accepted = {}
       pushes = pushes + 1
+      -- Do not snap Audio.pos to startPos here: a volume relevel clears
+      -- started while keeping the open stream, and an old startPos of 0
+      -- would restart the song from the beginning.
       if not Audio.started then
         Audio.started = true
-        Audio.pos = Audio.startPos
       end
     else
       break
@@ -3937,6 +3939,26 @@ function Audio.tick(dt)
   end
 end
 
+-- Flush speaker buffers and re-pump at the current volume without reopening
+-- the DFPWM file or seeking. Used for instant volume / mute changes.
+function Audio.relevel()
+  if Audio.paused or not Audio.track or not Audio.fh then return end
+  local pos = Audio.position()
+  Audio.stopSpeakers()
+  Audio.yieldForStop()
+  if Audio.pending then
+    Audio.accepted = {}
+  end
+  -- Keep fh/decoder where they are. Re-anchor the playhead so tick accounting
+  -- matches the cleared speaker buffer (small skip of already-queued PCM).
+  Audio.startPos = pos
+  Audio.pos = pos
+  Audio.queuedSamples = 0
+  Audio.started = false
+  Audio.kickstart(8)
+end
+
+-- Full reopen + seek (speaker set changes, recovery). Not used for volume.
 function Audio.resync()
   if Audio.paused or not Audio.track then return end
   local pos = Audio.position()
