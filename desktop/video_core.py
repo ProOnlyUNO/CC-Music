@@ -35,14 +35,15 @@ ProgressFn = Callable[[str, float | None, str], None]
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpeg", ".mpg"}
 
 # Target wall: 9×3 advanced monitors @ scale 0.5 (~270×60 cells; INSTALL.md).
-# Default encode: 256×72 @ 8 fps — highest probe size that still loads Escape
-# (~141s) under jukebox caps (48 MiB / w≤320 / h≤120). Fill-blit scales to wall.
-DEFAULT_CELLS_W = 256
-DEFAULT_CELLS_H = 72
+# Default encode: 160×45 @ 8 fps — largest 32:9 size that stays under the ~20 MiB
+# CC disk limit for ~3 min tracks (≈19.8 MiB raw). Escape (~141s) ≈15.5 MiB.
+# Fill-blit scales to the wall; jukebox load cap remains 48 MiB / w≤320 / h≤120.
+DEFAULT_CELLS_W = 160
+DEFAULT_CELLS_H = 45
 DEFAULT_FPS = 8
 DEFAULT_MAX_SECONDS = 0  # 0 = full clip
-# Documented wall size (for CLI/UI hints). Longer tracks may need fewer cells
-# to stay under the 48 MiB load budget; Escape @ ~141s fits 256×72.
+# Documented wall size (for CLI/UI hints). Longer tracks need fewer cells to
+# stay under the ~20 MiB disk budget; ~3 min fits 160×45.
 TARGET_MONITOR_CELLS_W = 270
 TARGET_MONITOR_CELLS_H = 60
 

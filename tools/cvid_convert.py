@@ -3,9 +3,10 @@
 
 Usage:
   python tools/cvid_convert.py path/to/clip.mp4 -o out/Artist/Album
-  python tools/cvid_convert.py folder_of_videos -o dfpwm_out --fps 8 --cells 256x72
+  python tools/cvid_convert.py folder_of_videos -o dfpwm_out --fps 8 --cells 160x45
 
-Defaults: 256×72 @ 8 fps for a 9×3 Advanced Monitor @ scale 0.5 (~270×60 wall).
+Defaults: 160×45 @ 8 fps for a 9×3 Advanced Monitor @ scale 0.5 (~270×60 wall),
+under the ~20 MiB CC disk limit for ~3 min tracks.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ def main() -> int:
     p.add_argument(
         "--cells",
         default=f"{video_core.DEFAULT_CELLS_W}x{video_core.DEFAULT_CELLS_H}",
-        help="Cell size WxH (default 256x72)",
+        help="Cell size WxH (default 160x45)",
     )
     p.add_argument("--max-seconds", type=float, default=0, help="Trim length (0 = full)")
     p.add_argument("--overwrite", action="store_true")
@@ -42,7 +43,7 @@ def main() -> int:
         w_s, h_s = args.cells.lower().split("x", 1)
         cells_w, cells_h = int(w_s), int(h_s)
     except ValueError:
-        print("Bad --cells; use e.g. 256x72", file=sys.stderr)
+        print("Bad --cells; use e.g. 160x45", file=sys.stderr)
         return 2
 
     def log(msg: str) -> None:
