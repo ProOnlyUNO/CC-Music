@@ -7,7 +7,8 @@ Copy every .lua in this folder onto your MAIN CC computer
 Files
 -----
   jukebox.lua         Main pixel jukebox UI (required) — library / lyrics / APPEARANCE
-  Importer.lua        Drag-drop .dfpwm / .lrc / .nfp onto the computer screen
+  Importer.lua        Drag-drop .dfpwm / .lrc / .nfp / .png / .jpg onto the computer screen
+                      (writes music/<Artist>/<Album>/; art prompts if no match)
   sort-music.lua      Optional — tidy library, merge Name 2 collisions, clear root
                       media, place orphan lyrics + keep .nfp art beside songs.
                       Audio deletes OFF by default.
