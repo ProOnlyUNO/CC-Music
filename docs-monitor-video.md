@@ -9,8 +9,8 @@ Same stem beside the song (Importer-friendly):
 ```text
 music/$uicideboy$/Sing Me a Lullaby, My Sweet Temptation/
   Escape from BABYLON.dfpwm
-  Escape from BABYLON.cvid          (single ≤ ~20 MiB)
-  Escape from BABYLON.cvid.1/.2     (multipart high-res)
+  Escape from BABYLON.cvid          (single ≤ ~18 MiB)
+  Escape from BABYLON.cvid.1/.2/.3  (multipart high-res)
   Escape from BABYLON.lrc           (optional)
 ```
 
@@ -18,7 +18,7 @@ music/$uicideboy$/Sing Me a Lullaby, My Sweet Temptation/
 
 ## Encode (Windows)
 
-Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **256×72 cells @ 8 fps**. Packs over the ~20 MiB CC disk limit auto-split into `Song.cvid.1` / `.2` / `.3` (jukebox seamless-loads the next part). Single-file fallback: `--cells 160x45` (fits ~3 min under 20 MiB).
+Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **256×72 cells @ 8 fps**. Packs over the **18 MiB** per-file budget (headroom under CC’s ~20 MiB disk) auto-split into `Song.cvid.1` / `.2` / `.3` (jukebox seamless-loads the next part). Single-file fallback: `--cells 160x45` (fits ~2.5–3 min under 18 MiB).
 
 ### CC Music Tools (Convert tab)
 
@@ -58,5 +58,5 @@ Encoded from the uploaded lyric video into the desktop library:
 ```text
 C:\Users\Smoke\Desktop\CC\Music CC\$UICIDEBOY$\Sing Me a Lullaby, My Sweet Temptation\
   Escape from BABYLON.dfpwm
-  Escape from BABYLON.cvid.1 / .cvid.2   (256×72 @ 8 fps, ~1129 frames, ≤20 MiB each)
+  Escape from BABYLON.cvid.1 / .cvid.2 / .cvid.3   (256×72 @ 8 fps, ~1129 frames, ≤18 MiB each)
 ```

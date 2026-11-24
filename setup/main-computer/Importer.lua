@@ -31,7 +31,7 @@
   .cvid / .cvid.N: same basename match as .lrc — prefer beside the
       matching .dfpwm; if that disk is full, spill Artist/Album onto the
       next free disk (jukebox finds packs across mounts). Multipart
-      high-res packs use Song.cvid.1/.2/.3 (each ≤ ~20 MiB).
+      high-res packs use Song.cvid.1/.2/.3 (each ≤ ~18 MiB).
 
   .nfp / .png / .jpg: place into matching Artist/Album.
       cover/album/folder/front/art names → album cover.* beside the album
