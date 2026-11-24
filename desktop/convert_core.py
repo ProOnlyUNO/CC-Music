@@ -391,7 +391,6 @@ def run_convert(
                     convert_art_for_track(
                         Path(it["src"]),
                         Path(dst),
-                        size=16,
                         overwrite=overwrite,
                         ffmpeg=exe,
                         log=_log,

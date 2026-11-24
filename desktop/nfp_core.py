@@ -37,6 +37,10 @@ CC_PALETTE: list[tuple[int, int, int]] = [
 
 NFP_CHARS = "0123456789abcdef"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
+# Default cover resolution for jukebox thumbs. Aurora UI resamples into
+# slot sizes (Art.buildCells), so 48×48 fits list + now-playing without
+# 1:1 overflow. 32×32 is fine too; 48 keeps more detail on large art.
+DEFAULT_NFP_SIZE = 48
 COVER_NAMES = {
     "cover",
     "folder",
@@ -68,7 +72,7 @@ def nearest_cc(rgb: tuple[int, int, int], *, allow_transparent: bool = False) ->
 def image_to_nfp_lines(
     path: Path | str,
     *,
-    size: int = 16,
+    size: int = DEFAULT_NFP_SIZE,
     allow_transparent: bool = False,
 ) -> list[str]:
     """Resize + quantize an image file to .nfp row strings."""
@@ -96,7 +100,7 @@ def write_nfp(
     src: Path | str,
     dst: Path | str,
     *,
-    size: int = 16,
+    size: int = DEFAULT_NFP_SIZE,
     allow_transparent: bool = False,
 ) -> Path:
     src_p, dst_p = Path(src), Path(dst)
@@ -175,7 +179,7 @@ def convert_art_for_track(
     src_audio: Path,
     dst_dfpwm: Path,
     *,
-    size: int = 16,
+    size: int = DEFAULT_NFP_SIZE,
     overwrite: bool = False,
     ffmpeg: str | None = None,
     log: LogFn | None = None,
@@ -224,7 +228,7 @@ def convert_image_file(
     src: Path | str,
     dst: Path | str | None = None,
     *,
-    size: int = 16,
+    size: int = DEFAULT_NFP_SIZE,
 ) -> Path:
     src_p = Path(src)
     dst_p = Path(dst) if dst else src_p.with_suffix(".nfp")
@@ -234,7 +238,7 @@ def convert_image_file(
 def batch_convert_images(
     paths: Iterable[Path | str],
     *,
-    size: int = 16,
+    size: int = DEFAULT_NFP_SIZE,
     log: LogFn | None = None,
 ) -> list[Path]:
     out: list[Path] = []

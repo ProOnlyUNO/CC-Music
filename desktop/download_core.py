@@ -971,17 +971,16 @@ def organize_tracks(
                 nfp = convert_art_for_track(
                     dest,
                     dest,
-                    size=16,
                     overwrite=False,
                     ffmpeg=shutil.which("ffmpeg"),
                     log=log,
                 )
                 if nfp is None and art_dest.suffix.lower() != ".nfp":
                     song_nfp = dest.with_suffix(".nfp")
-                    write_nfp(art_dest, song_nfp, size=16)
+                    write_nfp(art_dest, song_nfp)
                     cover_nfp = dest.parent / "cover.nfp"
                     if not cover_nfp.exists():
-                        write_nfp(art_dest, cover_nfp, size=16)
+                        write_nfp(art_dest, cover_nfp)
                     nfp = song_nfp
                     if log:
                         log(f"  art  {song_nfp.relative_to(root).as_posix()}")

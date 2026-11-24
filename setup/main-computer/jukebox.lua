@@ -2763,10 +2763,14 @@ function Art.trackImage(track)
 end
 
 -- Build a per-cell art object (3 bytes per cell: fg, bg, mask).
+-- Samples from img.w × img.h so higher-res .nfp covers (32+/48+) scale into
+-- whatever UI slot size is requested without 1:1 overflow.
 function Art.buildCells(img, cw, ch)
   cw, ch = math.max(1, math.floor(cw)), math.max(1, math.floor(ch))
   local pal = Theme.artPalette()
   local pix = img.pix
+  local iw = math.max(1, tonumber(img.w) or IMG)
+  local ih = math.max(1, tonumber(img.h) or IMG)
   local data = {}
   local count = {}
   local colors = {}
@@ -2775,10 +2779,10 @@ function Art.buildCells(img, cw, ch)
       local vals = {}
       local n = 0
       for sy = 0, 2 do
-        local py = math.min(IMG - 1, math.floor(((cy * 3 + sy) + 0.5) * IMG / (ch * 3)))
+        local py = math.min(ih - 1, math.floor(((cy * 3 + sy) + 0.5) * ih / (ch * 3)))
         for sx = 0, 1 do
-          local px = math.min(IMG - 1, math.floor(((cx * 2 + sx) + 0.5) * IMG / (cw * 2)))
-          local c = pix:byte(py * IMG + px + 1) or 0
+          local px = math.min(iw - 1, math.floor(((cx * 2 + sx) + 0.5) * iw / (cw * 2)))
+          local c = pix:byte(py * iw + px + 1) or 0
           n = n + 1
           vals[n] = c
           count[c] = (count[c] or 0) + 1
@@ -2891,11 +2895,13 @@ function Art.playlistImage(pl)
     local qx = quad % 2
     local qy = math.floor(quad / 2)
     if img then
+      local iw = math.max(1, tonumber(img.w) or IMG)
+      local ih = math.max(1, tonumber(img.h) or IMG)
       for y = 0, IMG / 2 - 1 do
         for x = 0, IMG / 2 - 1 do
-          local sx = math.min(IMG - 1, math.floor((x + 0.5) * IMG / (IMG / 2)))
-          local sy = math.min(IMG - 1, math.floor((y + 0.5) * IMG / (IMG / 2)))
-          local c = img.pix:sub(sy * IMG + sx + 1, sy * IMG + sx + 1)
+          local sx = math.min(iw - 1, math.floor((x + 0.5) * iw / (IMG / 2)))
+          local sy = math.min(ih - 1, math.floor((y + 0.5) * ih / (IMG / 2)))
+          local c = img.pix:sub(sy * iw + sx + 1, sy * iw + sx + 1)
           local tx = qx * (IMG / 2) + x
           local ty = qy * (IMG / 2) + y
           chars[ty * IMG + tx + 1] = c
@@ -10044,7 +10050,11 @@ local function decodeNfp(path, pal)
     if type(row) == "table" and #row > w then w = #row end
   end
   if w < 1 or h < 1 then return nil, "empty nfp" end
-  local IMG = 96
+  -- Keep native .nfp resolution (16 / 32 / 48+). Art.buildCells scales into
+  -- the UI slot; avoid baking a 96×96 upsample that softens detail.
+  local side = math.max(w, h)
+  -- Cap extreme covers so cache stays light; still above desktop default 32.
+  if side > 64 then side = 64 end
   local pix = {}
   local function nearest(col)
     if type(col) ~= "number" or col == 0 then return 15 end
@@ -10054,15 +10064,15 @@ local function decodeNfp(path, pal)
     while v > 1 and bit < 15 do v = math.floor(v / 2); bit = bit + 1 end
     return bit
   end
-  for ty = 0, IMG - 1 do
-    local sy = math.floor(ty * h / IMG) + 1
+  for ty = 0, side - 1 do
+    local sy = math.floor(ty * h / side) + 1
     local row = img[sy] or {}
-    for tx = 0, IMG - 1 do
-      local sx = math.floor(tx * w / IMG) + 1
+    for tx = 0, side - 1 do
+      local sx = math.floor(tx * w / side) + 1
       pix[#pix + 1] = string.char(nearest(row[sx]))
     end
   end
-  return { w = IMG, h = IMG, pix = table.concat(pix), source = "nfp", path = path }
+  return { w = side, h = side, pix = table.concat(pix), source = "nfp", path = path }
 end
 
 local _loadImage = Art.loadImage
