@@ -15,8 +15,9 @@
 | **3-panel jukebox** | Artist → Album → Song UI on a **9×3** Advanced Monitor; shuffle, seek, volume, All Songs, **DJ** mode + SFX transitions |
 | **Side visualizers** | Spectrum / waveform / particles on **4×4** monitors; **LYRICS** big-text mode |
 | **Pocket remote** | Wireless library sync + tap-to-play (`pocket_mp3`) |
-| **Importer / sort / delete** | Drag-drop `.dfpwm` + `.lrc`, tidy library, safe deletes |
-| **CC Music Tools (Windows)** | Download YouTube playlists or Genius albums → MP3, convert → `.dfpwm`, fetch lyrics (LRCLIB), install `setup/` map |
+| **Importer / sort / delete** | Drag-drop `.dfpwm` + `.lrc` + `.cvid`, tidy library, safe deletes |
+| **Music video (offline)** | MP4 → `.cvid` frame pack + `.dfpwm`; jukebox hands off the main monitor after ~3.5s |
+| **CC Music Tools (Windows)** | Download YouTube playlists or Genius albums → MP3, convert → `.dfpwm` / `.cvid`, fetch lyrics (LRCLIB), install `setup/` map |
 
 ## How to use
 
@@ -68,6 +69,14 @@ Start with [`setup/START_HERE.txt`](setup/START_HERE.txt).
 2. Copy `.dfpwm` / `.lrc` into the game  
 3. Run **Importer** and drag-drop onto the **computer screen**  
 4. Restart jukebox so tracks with lyrics show `(L)`
+
+### 4. Music video (optional, offline)
+
+1. Convert tab → **Music video** (or `python tools/cvid_convert.py clip.mp4 -o Artist/Album`)  
+2. Put `Song.cvid` beside `Song.dfpwm`  
+3. Play in jukebox → after ~3.5s the main monitor switches to the video (audio continuous)
+
+How-to: [`docs-monitor-video.md`](docs-monitor-video.md).
 
 More detail: [`INSTALL.md`](INSTALL.md).
 

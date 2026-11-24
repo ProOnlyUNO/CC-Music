@@ -11,6 +11,10 @@
       music/Artist/Album/*.dfpwm
       Album covers: cover.nfp / album.nfp / matching .nfp beside tracks
       Also BMP/PPM covers (AURORA art path). Lyrics: matching .lrc/.txt
+      Music video (optional): matching .cvid beside the .dfpwm
+        → after ~3.5s the main monitor switches to the video; audio keeps playing.
+        Right-click (or SONG) returns to the normal now-playing UI.
+        NEXT/BACK in video mode stay on video when the neighbour has a .cvid.
 
   Protocols (unchanged):
       pocket_mp3   — pocket remote
@@ -575,6 +579,9 @@ Config.defaults = {
   recentApps = {},
   recentFiles = {},
   showLyricsPreview = true,
+  -- Music-video handoff: play jukebox UI first, then switch this monitor to .cvid.
+  musicVideo = true,
+  videoDelaySec = 3.5,
   roots = nil,
   speakerEnabled = {},
   speakerGain = {},
@@ -660,6 +667,8 @@ local function validate(c)
   if c.albumView ~= "grid" and c.albumView ~= "list" then c.albumView = "grid" end
   if type(c.lastTab) ~= "string" then c.lastTab = "albums" end
   c.showLyricsPreview = c.showLyricsPreview ~= false
+  c.musicVideo = c.musicVideo ~= false
+  c.videoDelaySec = Util.clamp(tonumber(c.videoDelaySec) or d.videoDelaySec or 3.5, 0, 30)
   c.recentApps = validStringList(c.recentApps, 8)
   c.recentFiles = validStringList(c.recentFiles, 10)
   c.roots = validStringList(c.roots, Config.MAX_ROOTS)
@@ -4414,15 +4423,20 @@ function Player.playEntryAt(pos, from)
   Player.fails = 0
   Audio.track = track
   Audio.pos = from or 0
+  local stayVideo = Video.musicStay == true
+  Video.musicStay = false
   local ok, err = Audio.playTrack(track, from or 0)
   if ok then
     Player.paused = false
     Data.addRecent(track)
     Audio.viz.active = true
+    -- Arm sibling .cvid for delayed handoff (or immediate stay after NEXT/BACK).
+    if Video.armForTrack then Video.armForTrack(track, { stay = stayVideo }) end
   else
     Player.paused = true
     Audio.paused = true
     Audio.pos = from or 0
+    if Video.clearMusic then Video.clearMusic() end
     if err == "no speakers attached" then
       UI.toast("No speakers attached - press play after connecting one", "warning")
     else
@@ -4475,6 +4489,7 @@ function Player.stop(silent)
   Audio.paused = true
   Audio.pos = 0
   Player.pos = 0
+  if Video.clearMusic then Video.clearMusic() end
   Player.saveSession()
   if not silent then UI.toast("Stopped", "info") end
   UI.request(true)
@@ -4498,6 +4513,7 @@ function Player.next(auto)
     return false
   end
   if auto and Player.repeatMode == "one" and Player.curEntry then
+    if Video.musicActive then Video.musicStay = true end
     return Player.playEntryAt(Player.qpos)
   end
   local np = Player.qpos + 1
@@ -4518,6 +4534,8 @@ function Player.next(auto)
     end
     np = 1
   end
+  -- Stay in music-video mode across tracks that also have a .cvid pack.
+  if Video.musicActive then Video.musicStay = true end
   Player.qpos = np
   return Player.playEntryAt(np)
 end
@@ -4526,10 +4544,14 @@ function Player.prev()
   if not Player.cur then return end
   if Audio.position() > 3 then
     Player.seek(0)
+    if Video.musicActive and Video.syncToAudio then Video.syncToAudio(); UI.request(true) end
   else
     local np = Player.qpos - 1
     if np < 1 then np = #Player.qorder end
-    if np >= 1 then Player.playEntryAt(np) end
+    if np >= 1 then
+      if Video.musicActive then Video.musicStay = true end
+      Player.playEntryAt(np)
+    end
   end
 end
 
@@ -4968,6 +4990,103 @@ function Video.ensure()
   if #files == 0 then files = Video.scanFiles() end
   if #files > 0 then return Video.load(files[1]) end
   return false
+end
+
+------------------------------------------------------------------ music-video handoff (CTJP-12)
+-- Play the normal now-playing UI first; after videoDelaySec, switch THIS
+-- monitor to the sibling .cvid while DFPWM audio keeps running.  Right-click
+-- (or SONG) dismisses back to the song screen for the rest of the track.
+-- NEXT/BACK keep video mode when the neighbour track also has a .cvid.
+Video.musicActive = false
+Video.musicArmed = false
+Video.musicDismissed = false
+Video.musicStay = false
+Video.musicTrackPath = nil
+
+function Video.cvidBeside(dfpwmPath)
+  if type(dfpwmPath) ~= "string" or dfpwmPath == "" then return nil end
+  local base = dfpwmPath:gsub("%.[Dd][Ff][Pp][Ww][Mm]$", "")
+  local candidates = { base .. ".cvid", base .. ".CVID" }
+  for _, p in ipairs(candidates) do
+    if fs.exists(p) and not fs.isDir(p) then return p end
+  end
+  return nil
+end
+
+function Video.clearMusic()
+  Video.musicActive = false
+  Video.musicArmed = false
+  Video.musicDismissed = false
+  Video.musicTrackPath = nil
+  Video.musicStay = false
+  if Video.loaded and Video.path and tostring(Video.path):lower():match("%.cvid$") then
+    -- Only close when we were driving a music-video pack (leave standalone Video app alone
+    -- if the user opened a different file on the Video screen).
+    if App.screen ~= "video" then Video.close() end
+  end
+end
+
+function Video.syncToAudio()
+  if not Video.loaded then return end
+  local ms = math.floor((Audio.position() or 0) * 1000 + 0.5)
+  Video.position = Util.clamp(ms, 0, Video.total or 0)
+  Video.frame = Video.frameFor(Video.position)
+  Video.cacheFrame = 0
+  Video.playing = false
+  Video.lastNow = nil
+end
+
+function Video.armForTrack(track, opts)
+  opts = opts or {}
+  local stay = opts.stay == true
+  Video.musicDismissed = false
+  Video.musicTrackPath = track and track.path or nil
+  Video.musicArmed = false
+  Video.musicActive = false
+  if not track or not App.cfg or App.cfg.musicVideo == false then
+    if App.screen ~= "video" then Video.close() end
+    return false
+  end
+  local path = Video.cvidBeside(track.path)
+  if not path then
+    if App.screen ~= "video" then Video.close() end
+    return false
+  end
+  if not Video.load(path) then
+    return false
+  end
+  Video.musicArmed = true
+  if stay then
+    Video.musicActive = true
+    Video.syncToAudio()
+  end
+  return true
+end
+
+function Video.dismissMusic()
+  if not Video.musicActive then return false end
+  Video.musicActive = false
+  Video.musicDismissed = true
+  UI.request(true)
+  return true
+end
+
+function Video.musicTick()
+  if not Video.musicArmed or Video.musicDismissed then return end
+  if not Player.cur or Player.paused then return end
+  if App.cfg and App.cfg.musicVideo == false then return end
+  if Video.musicActive then
+    local before = Video.frame
+    Video.syncToAudio()
+    if Video.frame ~= before then UI.request() end
+    return
+  end
+  local delay = tonumber(App.cfg and App.cfg.videoDelaySec) or 3.5
+  if (Audio.position() or 0) >= delay then
+    Video.musicActive = true
+    Video.syncToAudio()
+    UI.request(true)
+  end
 end
 
 --======== 87_apps.lua ========
@@ -6759,7 +6878,45 @@ function Screens.homeIdle(m)
   end
 end
 
+function Screens.musicVideo()
+  -- Full-bleed video on the same main monitor; audio continues via Audio.*.
+  local w, h = Canvas.w, Canvas.h
+  local barH = 4
+  Canvas:fill(1, 1, w, h, Theme.C.bg)
+  if Video.loaded then
+    Video.draw(1, 1, w, math.max(1, h - barH), true)
+  else
+    Canvas:textCenter(1, math.floor(h / 2), w, "NO VIDEO", Theme.C.text, Theme.C.bg)
+  end
+  Canvas:fill(1, h - barH + 1, w, barH, Theme.C.surface)
+  local title = Player.cur and Player.cur.title or "VIDEO"
+  Canvas:textCenter(12, h - barH + 2, math.max(8, w - 24), Util.fit(title, math.max(8, w - 24)), Theme.C.muted, Theme.C.surface)
+  -- Bottom: BACK + SONG (exit video) + NEXT. Stay in video mode across packs.
+  UI.button(2, h - barH + 1, 9, 3, "BACK", {
+    variant = "surface",
+    fn = function()
+      Video.musicStay = true
+      Player.prev()
+    end,
+  })
+  UI.button(math.max(12, math.floor(w / 2) - 4), h - barH + 1, 9, 3, "SONG", {
+    variant = "primary",
+    fn = function() Video.dismissMusic() end,
+  })
+  UI.button(w - 10, h - barH + 1, 9, 3, "NEXT", {
+    variant = "surface",
+    fn = function()
+      Video.musicStay = true
+      Player.next(false)
+    end,
+  })
+end
+
 function Screens.music()
+  if Video.musicActive and Video.loaded and Player.cur then
+    Screens.musicVideo()
+    return
+  end
   local m = UI.frame({ title = "", tab = "music", mini = false })
   if Player.cur then
     Screens.nowPlaying(m)
@@ -9978,7 +10135,14 @@ function App.handleEvent(ev, p1, p2, p3)
     end
   elseif ev == "mouse_click" then
     if p1 == 1 then UI.tap(p2, p3)
-    elseif p1 == 2 then App.back() end
+    elseif p1 == 2 then
+      -- Right-click during music video → normal song/jukebox screen (audio keeps playing).
+      if Video.dismissMusic and Video.dismissMusic() then
+        -- stayed on music tab
+      else
+        App.back()
+      end
+    end
   elseif ev == "mouse_scroll" then
     App.scrollWheel(p1)
   elseif ev == "mouse_drag" or ev == "mouse_up" then
@@ -10032,6 +10196,7 @@ end
 
 function App.tick()
   Audio.tick(0)
+  if Video.musicTick then Video.musicTick() end
   if App.screen == "video" and Video.tick then Video.tick(Util.now()) end
   UI.update(0)
   Store.flush()

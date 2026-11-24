@@ -8,3 +8,5 @@ build/
 Thumbs.db
 *.exe
 !desktop/
+desktop/video_out_sample/
+desktop/dfpwm_out/
