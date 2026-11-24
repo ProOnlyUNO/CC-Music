@@ -17,7 +17,7 @@ music/$uicideboy$/Sing Me a Lullaby, My Sweet Temptation/
 
 ## Encode (Windows)
 
-Defaults for a **9×3 Advanced Monitor @ scale 0.5**: **64×18 cells @ 8 fps**.
+Defaults for a **9×3 Advanced Monitor @ scale 0.5** (~270×60 wall): **128×36 cells @ 8 fps** (half-wall encode; jukebox fill-blits to the monitor).
 
 ### CC Music Tools (Convert tab)
 
@@ -30,7 +30,7 @@ Defaults for a **9×3 Advanced Monitor @ scale 0.5**: **64×18 cells @ 8 fps**.
 
 ```text
 cd desktop
-python ../tools/cvid_convert.py path\to\clip.mp4 -o "path\to\Artist\Album" --fps 8 --cells 64x18
+python ../tools/cvid_convert.py path\to\clip.mp4 -o "path\to\Artist\Album" --fps 8 --cells 128x36
 ```
 
 ## Sync into Minecraft
@@ -55,5 +55,5 @@ Encoded from the uploaded lyric video into the desktop library:
 ```text
 C:\Users\Smoke\Desktop\CC\Music CC\$UICIDEBOY$\Sing Me a Lullaby, My Sweet Temptation\
   Escape from BABYLON.dfpwm
-  Escape from BABYLON.cvid   (64×18 @ 8 fps, ~1129 frames)
+  Escape from BABYLON.cvid   (128×36 @ 8 fps, ~1129 frames)
 ```
