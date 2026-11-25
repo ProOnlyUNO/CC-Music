@@ -4743,13 +4743,13 @@ end
 --   frameCount fixed-size frames (2 bytes per cell), duration table (u16 each).
 -- Each cell is [mask 0..31][fg high nibble, bg low nibble].  The mask uses the
 -- same 2x3 sextant geometry as the rest of AURORA.
--- Multipart: Song.cvid.1/.2/.3 (each a full CVID1 slice ≤ ~18 MiB). Player keeps
+-- Multipart: Song.cvid.1/.2/.3 (each a full CVID1 slice ≤ ~15 MiB). Player keeps
 -- one part in RAM and seamless-loads the next when the frame crosses a boundary.
--- Single-file Song.cvid still works (≤18 MiB fallback, e.g. 160×45).
+-- Single-file Song.cvid still works (≤15 MiB fallback, e.g. 160×45).
 Video = {}
 Video.magic = "CVID1"
 Video.headerSize = 64
-Video.maxPartBytes = 18 * 1024 * 1024
+Video.maxPartBytes = 15 * 1024 * 1024
 Video.loaded = false
 Video.playing = false
 Video.fullscreen = false
