@@ -3,7 +3,7 @@
 
 Pack layout (Importer-friendly, beside the song):
     Artist/Album/Song.dfpwm
-    Artist/Album/Song.cvid              (single file when ≤ ~15 MiB)
+    Artist/Album/Song.cvid              (single file when ≤ ~14 MiB)
     Artist/Album/Song.cvid.1/.2/.3      (multipart when high-res exceeds budget)
 
 CVID1 matches jukebox.lua Video (Aurora):
@@ -37,17 +37,17 @@ ProgressFn = Callable[[str, float | None, str], None]
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpeg", ".mpg"}
 
 # Target wall: 9×3 advanced monitors @ scale 0.5 (~270×60 cells; INSTALL.md).
-# Default encode: 256×72 @ 8 fps — near-wall. Packs that exceed the ~15 MiB
+# Default encode: 256×72 @ 8 fps — near-wall. Packs that exceed the ~14 MiB
 # per-file budget are auto-split into Song.cvid.1/.2/.3 (each a full CVID1 slice).
-# Single-file fallback: 160×45 stays under ~15 MiB for ~2.5–3 min tracks.
+# Single-file fallback: 160×45 stays under ~14 MiB for ~2.5–3 min tracks.
 DEFAULT_CELLS_W = 256
 DEFAULT_CELLS_H = 72
 SINGLE_FILE_CELLS_W = 160
 SINGLE_FILE_CELLS_H = 45
 DEFAULT_FPS = 8
 DEFAULT_MAX_SECONDS = 0  # 0 = full clip
-# Per-file budget (headroom under CC ~20 MiB disk). 0 disables multipart split.
-MAX_PART_BYTES = 15 * 1024 * 1024
+# Per-file budget (headroom under CC:Tweaked 16 MiB upload_max_size). 0 disables multipart split.
+MAX_PART_BYTES = 14 * 1024 * 1024
 # Documented wall size (for CLI/UI hints).
 TARGET_MONITOR_CELLS_W = 270
 TARGET_MONITOR_CELLS_H = 60
